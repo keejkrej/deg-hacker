@@ -22,7 +22,7 @@ from torch.utils.data import Dataset, DataLoader
 import matplotlib.pyplot as plt
 
 from utils import simulate_single_particle, simulate_multi_particle
-from helpers import generate_kymograph, get_diffusion_coefficient
+from utils.helpers import generate_kymograph, get_diffusion_coefficient
 
 
 class ConvBlock(nn.Module):
@@ -484,7 +484,7 @@ def denoise_and_segment_chunked(
             pred_noise, pred_mask_logits = model(input_tensor)
             denoised = torch.clamp(input_tensor - pred_noise, 0.0, 1.0).squeeze().cpu().numpy()
             # Convert logits to class predictions
-            pred_classes = torch.argmax(pred_mask_logits, dim=1).squeeze().cpu().numpy()
+            pred_classes = torch.argmax(pred_mask_logits, dim=1).squeeze().cpu().numpy().astype(np.int64)
         return denoised, pred_classes
     
     # Process in chunks with overlap

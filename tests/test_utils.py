@@ -15,7 +15,7 @@ from utils import (
     AnalysisMetrics,
     MultiSimulationData,
 )
-from helpers import estimate_diffusion_msd_fit, get_particle_radius
+from utils.helpers import estimate_diffusion_msd_fit, get_particle_radius
 
 
 class TestSimulation:
