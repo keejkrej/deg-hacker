@@ -296,6 +296,9 @@ class MultiTaskConfig:
     max_grad_norm: float = 1.0
     use_lr_scheduler: bool = True
     device: str = _default_device()
+    checkpoint_dir: Optional[str] = None  # Directory to save checkpoints (None = don't save)
+    save_best: bool = True  # Save best model based on total loss
+    checkpoint_every: int = 1  # Save checkpoint every N epochs (1 = every epoch)
 
 
 def dice_loss_multiclass(pred: torch.Tensor, target: torch.Tensor, n_classes: int, smooth: float = 1e-6) -> torch.Tensor:
@@ -378,8 +381,12 @@ def train_multitask_model(
     print(f"  Denoise loss: {config.denoise_loss} (weight: {config.denoise_loss_weight})")
     print(f"  Segment loss: {config.segment_loss} (weight: {config.segment_loss_weight})")
     print(f"  Dataset size: {len(dataset)}")
+    if config.checkpoint_dir:
+        os.makedirs(config.checkpoint_dir, exist_ok=True)
+        print(f"  Checkpoint directory: {config.checkpoint_dir}")
     
     model.train()
+    best_loss = float('inf')
     
     for epoch in range(config.epochs):
         epoch_start_time = time.time()
@@ -453,6 +460,19 @@ def train_multitask_model(
               f"Denoise={avg_denoise_loss:.6f}, "
               f"Segment={avg_segment_loss:.6f}, "
               f"Time={epoch_time:.2f}s")
+        
+        # Save checkpoint if configured
+        if config.checkpoint_dir and (epoch + 1) % config.checkpoint_every == 0:
+            checkpoint_path = os.path.join(config.checkpoint_dir, f"checkpoint_epoch_{epoch+1}.pth")
+            save_multitask_model(model, checkpoint_path)
+        
+        # Save best model if configured
+        if config.save_best and avg_total_loss < best_loss:
+            best_loss = avg_total_loss
+            if config.checkpoint_dir:
+                best_path = os.path.join(config.checkpoint_dir, "best_model.pth")
+                save_multitask_model(model, best_path)
+                print(f"  ✓ New best model saved (loss: {best_loss:.6f})")
         
         if scheduler is not None:
             scheduler.step(avg_total_loss)
