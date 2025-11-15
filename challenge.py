@@ -286,13 +286,19 @@ def process_single_particle_file(
     axes[1, 0].set_ylabel("Position")
     
     # Bottom right: Estimated trajectory
+    # Set same limits as kymograph plots
+    time_len, width = kymograph_noisy.shape
     if not np.all(np.isnan(estimated_path_pixels)):
         axes[1, 1].plot(estimated_path_pixels, color="blue", lw=1.0)
+        axes[1, 1].set_xlim(0, time_len)
+        axes[1, 1].set_ylim(0, width)
         axes[1, 1].set_title("Estimated Trajectory")
         axes[1, 1].set_xlabel("Time")
         axes[1, 1].set_ylabel("Position (pixels)")
         axes[1, 1].grid(True, alpha=0.3)
     else:
+        axes[1, 1].set_xlim(0, time_len)
+        axes[1, 1].set_ylim(0, width)
         axes[1, 1].text(0.5, 0.5, "No valid trajectory", 
                         ha='center', va='center', transform=axes[1, 1].transAxes)
         axes[1, 1].set_title("Estimated Trajectory (No valid track)")
@@ -528,6 +534,8 @@ def process_multi_particle_file(
     axes[0, 1].legend(loc='upper right', fontsize=8)
     
     # Trajectories plot
+    # Set same limits as kymograph plots
+    time_len, width = kymograph_noisy.shape
     for track_id in range(n_particles):
         track = estimated_tracks[track_id]
         valid_mask = ~np.isnan(track)
@@ -536,6 +544,8 @@ def process_multi_particle_file(
             axes[1, 0].plot(
                 track, color=color, lw=1.0, alpha=0.7, label=f"Track {track_id + 1}"
             )
+    axes[1, 0].set_xlim(0, time_len)
+    axes[1, 0].set_ylim(0, width)
     axes[1, 0].set_title("Estimated Trajectories")
     axes[1, 0].set_xlabel("Time")
     axes[1, 0].set_ylabel("Position")
