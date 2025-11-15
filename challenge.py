@@ -235,9 +235,10 @@ def process_single_particle_file(
         vmax=vmax,
         cmap="gray",
     )
-    # Convert estimated_path to original scale if needed (it's in normalized [0,1] coordinates)
+    # Plot track (convert from normalized to pixel coordinates for display)
     if not np.all(np.isnan(estimated_path)):
-        axes[1].plot(estimated_path, color="red", lw=1.5, alpha=0.8, label="Track")
+        track_plot = estimated_path * (kymograph_noisy.shape[1] - 1)
+        axes[1].plot(track_plot, color="red", lw=1.5, alpha=0.8, label="Track")
     axes[1].set_title(f"Denoised & Tracked\nD={diffusion_processed:.4f} μm²/s")
     axes[1].set_xlabel("Time")
     axes[1].set_ylabel("Position")
