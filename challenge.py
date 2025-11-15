@@ -421,10 +421,54 @@ def process_multi_particle_file(
     print(f"  Normalized range: [{kymograph_noisy_norm.min():.4f}, {kymograph_noisy_norm.max():.4f}]")
     print(f"  Normalized bg percentile (10th): {np.percentile(kymograph_noisy_norm, 10):.4f}, signal percentile (99th): {np.percentile(kymograph_noisy_norm, 99):.4f}")
     
-    # Denoise
+    # Denoise (iteratively if needed)
     denoised_norm = denoise_kymograph_chunked(
         model, kymograph_noisy_norm, device=device, chunk_size=512, overlap=64
     )
+    
+    # Check if we should run denoiser again
+    # Criteria: contrast increased significantly but noise is still relatively high
+    noise_input, contrast_input = estimate_noise_and_contrast(kymograph_noisy_norm)
+    noise_denoised, contrast_denoised = estimate_noise_and_contrast(denoised_norm)
+    
+    contrast_improvement = contrast_denoised / max(contrast_input, 1e-6)
+    noise_reduction = noise_denoised / max(noise_input, 1e-6)
+    
+    # Run again if: contrast improved significantly (>1.5x) but noise reduction is modest (<0.7x)
+    # and noise level is still relatively high (>0.05)
+    max_iterations = 2
+    iteration = 1
+    while (iteration < max_iterations and 
+           contrast_improvement > 1.5 and 
+           noise_reduction > 0.7 and 
+           noise_denoised > 0.05):
+        print(f"  Iteration {iteration + 1}: Contrast improved {contrast_improvement:.2f}x, but noise reduction only {noise_reduction:.2f}x")
+        print(f"    Running denoiser again...")
+        
+        # Renormalize the denoised output for another pass
+        denoised_bg = np.percentile(denoised_norm, 10)
+        denoised_bg_sub = denoised_norm - denoised_bg
+        denoised_sig = np.percentile(denoised_bg_sub, 99)
+        if denoised_sig > 0:
+            denoised_norm_2 = np.clip(denoised_bg_sub / denoised_sig, 0.0, 1.0)
+        else:
+            denoised_norm_2 = np.clip(denoised_bg_sub, 0.0, 1.0)
+        
+        denoised_norm = denoise_kymograph_chunked(
+            model, denoised_norm_2, device=device, chunk_size=512, overlap=64
+        )
+        
+        # Update metrics
+        noise_denoised, contrast_denoised = estimate_noise_and_contrast(denoised_norm)
+        contrast_improvement = contrast_denoised / max(contrast_input, 1e-6)
+        noise_reduction = noise_denoised / max(noise_input, 1e-6)
+        iteration += 1
+    
+    if iteration > 1:
+        print(f"  Completed {iteration} denoising iterations")
+    
+    print(f"  Noise: {noise_input:.4f} -> {noise_denoised:.4f} ({noise_reduction:.2f}x reduction)")
+    print(f"  Contrast: {contrast_input:.4f} -> {contrast_denoised:.4f} ({contrast_improvement:.2f}x improvement)")
     
     # Denormalize for analysis (convert back to original scale)
     denoised = denoised_norm * (kymograph_max - kymograph_min) + kymograph_min + background_level
@@ -434,16 +478,75 @@ def process_multi_particle_file(
         n_particles = estimate_n_particles(kymograph_noisy, denoised)
         print(f"  Estimated {n_particles} particles")
     
-    # Track particles
+    # Track particles (try with standard parameters first)
+    min_intensity = 0.01
     estimated_tracks = track_particles(
         denoised,
         n_particles=n_particles,
         max_candidates=30,
         max_jump=15,
+        min_intensity=min_intensity,
         detect_crossings=True,
         crossing_threshold=5.0,
         crossing_padding=2,
     )
+    
+    # Check if faint tracks were missed: count valid tracks
+    valid_tracks = np.sum([np.sum(~np.isnan(track)) > len(track) * 0.1 for track in estimated_tracks])
+    
+    # If we're missing tracks and denoising improved contrast, try:
+    # 1. Lower intensity threshold for faint tracks
+    # 2. Or rerun denoising if noise is still high
+    if valid_tracks < n_particles and contrast_improvement > 1.2:
+        print(f"  Warning: Only {valid_tracks}/{n_particles} tracks detected")
+        
+        # Try with lower intensity threshold for faint tracks
+        if min_intensity > 0.005:
+            print(f"    Retrying with lower intensity threshold (0.005)...")
+            min_intensity = 0.005
+            estimated_tracks = track_particles(
+                denoised,
+                n_particles=n_particles,
+                max_candidates=30,
+                max_jump=15,
+                min_intensity=min_intensity,
+                detect_crossings=True,
+                crossing_threshold=5.0,
+                crossing_padding=2,
+            )
+            valid_tracks = np.sum([np.sum(~np.isnan(track)) > len(track) * 0.1 for track in estimated_tracks])
+            print(f"    After lowering threshold: {valid_tracks}/{n_particles} tracks detected")
+        
+        # If still missing tracks and noise is high, consider another denoising pass
+        if valid_tracks < n_particles and noise_denoised > 0.05 and iteration < max_iterations:
+            print(f"    Still missing tracks, running additional denoising pass...")
+            # Renormalize for another pass
+            denoised_bg = np.percentile(denoised_norm, 10)
+            denoised_bg_sub = denoised_norm - denoised_bg
+            denoised_sig = np.percentile(denoised_bg_sub, 99)
+            if denoised_sig > 0:
+                denoised_norm_2 = np.clip(denoised_bg_sub / denoised_sig, 0.0, 1.0)
+            else:
+                denoised_norm_2 = np.clip(denoised_bg_sub, 0.0, 1.0)
+            
+            denoised_norm = denoise_kymograph_chunked(
+                model, denoised_norm_2, device=device, chunk_size=512, overlap=64
+            )
+            denoised = denoised_norm * (kymograph_max - kymograph_min) + kymograph_min + background_level
+            
+            # Retry tracking with lower threshold
+            estimated_tracks = track_particles(
+                denoised,
+                n_particles=n_particles,
+                max_candidates=30,
+                max_jump=15,
+                min_intensity=0.005,
+                detect_crossings=True,
+                crossing_threshold=5.0,
+                crossing_padding=2,
+            )
+            valid_tracks = np.sum([np.sum(~np.isnan(track)) > len(track) * 0.1 for track in estimated_tracks])
+            print(f"    After additional denoising: {valid_tracks}/{n_particles} tracks detected")
     
     # Estimate noise and contrast (global)
     noise_estimate_global, contrast_estimate_global = estimate_noise_and_contrast(
