@@ -302,6 +302,8 @@ class MultiTaskConfig:
     save_best: bool = True  # Save best model based on total loss
     checkpoint_every: int = 1  # Save checkpoint every N epochs (1 = every epoch)
     segment_class_weights: Optional[Tuple[float, ...]] = None  # Class weights for segmentation (None = auto)
+    resume_from: Optional[str] = None  # Path to checkpoint to resume training from
+    resume_epoch: Optional[int] = None  # Epoch number to resume from (if None, inferred from checkpoint)
 
 
 def compute_instance_iou(mask_pred: np.ndarray, mask_gt: np.ndarray) -> float:
@@ -499,10 +501,35 @@ def train_multitask_model(
     config: MultiTaskConfig,
     dataset: MultiTaskDataset,
 ) -> MultiTaskUNet:
-    """Train the multi-task model."""
+    """Train the multi-task model.
+    
+    If config.resume_from is set, loads checkpoint and resumes training from that point.
+    """
     
     # Create model
     model = MultiTaskUNet(base_channels=48, use_bn=True, max_tracks=dataset.max_trajectories).to(config.device)
+    
+    # Resume from checkpoint if specified
+    start_epoch = 0
+    best_loss = float('inf')
+    if config.resume_from and os.path.exists(config.resume_from):
+        print(f"\n📂 Resuming training from checkpoint: {config.resume_from}")
+        checkpoint = torch.load(config.resume_from, map_location=config.device)
+        
+        # Load model state
+        model.load_state_dict(checkpoint['model_state_dict'])
+        
+        # Load training state
+        start_epoch = checkpoint.get('epoch', 0)
+        if config.resume_epoch is not None:
+            start_epoch = config.resume_epoch
+        best_loss = checkpoint.get('best_loss', float('inf'))
+        
+        print(f"  Resuming from epoch {start_epoch + 1}")
+        print(f"  Best loss so far: {best_loss:.6f}")
+    elif config.resume_from:
+        print(f"⚠ Warning: Resume checkpoint not found: {config.resume_from}")
+        print("  Starting training from scratch")
     
     # Loss functions
     if config.denoise_loss == "l2":
@@ -536,6 +563,13 @@ def train_multitask_model(
     
     # Optimizer
     optimizer = optim.Adam(model.parameters(), lr=config.learning_rate)
+    
+    # Resume optimizer state if resuming
+    if config.resume_from and os.path.exists(config.resume_from):
+        checkpoint = torch.load(config.resume_from, map_location=config.device)
+        if 'optimizer_state_dict' in checkpoint:
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            print(f"  Resumed optimizer state")
     
     # Learning rate scheduler
     scheduler = None
@@ -639,7 +673,18 @@ def train_multitask_model(
         # Save checkpoint if configured
         if config.checkpoint_dir and (epoch + 1) % config.checkpoint_every == 0:
             checkpoint_path = os.path.join(config.checkpoint_dir, f"checkpoint_epoch_{epoch+1}.pth")
-            save_multitask_model(model, checkpoint_path)
+            # Save full checkpoint with training state for resuming
+            checkpoint = {
+                'epoch': epoch + 1,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'best_loss': best_loss,
+                'config': config,
+            }
+            if scheduler is not None:
+                checkpoint['scheduler_state_dict'] = scheduler.state_dict()
+            torch.save(checkpoint, checkpoint_path)
+            print(f"  💾 Checkpoint saved: {checkpoint_path}")
         
         # Save best model if configured
         if config.save_best and avg_total_loss < best_loss:
