@@ -160,8 +160,15 @@ def process_single_particle_file(
                     estimated_path.append(np.nan)
         estimated_path = np.array(estimated_path)
     
+    # Convert path to pixel coordinates for diffusion estimation
+    # estimated_path is in normalized coordinates [0, 1], convert to pixel positions
+    if not np.all(np.isnan(estimated_path)):
+        estimated_path_pixels = estimated_path * (kymograph_noisy.shape[1] - 1)
+    else:
+        estimated_path_pixels = estimated_path.copy()
+    
     # Check if path is valid (has variation and enough points)
-    valid_path = ~np.isnan(estimated_path)
+    valid_path = ~np.isnan(estimated_path_pixels)
     if np.sum(valid_path) < 10:
         print(f"  ⚠ Warning: Too few valid points ({np.sum(valid_path)}), using NaN for diffusion")
         diffusion_processed = np.nan
@@ -205,15 +212,16 @@ def process_single_particle_file(
         figure_path=f"{output_dir}/single_{Path(filepath).stem}.png",
     )
     
-    # Create visualization
+    # Create visualization - 2x2 layout for better diagnosis
     import matplotlib.pyplot as plt
     
     os.makedirs(output_dir, exist_ok=True)
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
     
     vmin, vmax = kymograph_noisy.min(), kymograph_noisy.max()
     
-    axes[0].imshow(
+    # Top left: Noisy input
+    axes[0, 0].imshow(
         kymograph_noisy.T,
         aspect="auto",
         origin="lower",
@@ -221,13 +229,26 @@ def process_single_particle_file(
         vmax=vmax,
         cmap="gray",
     )
-    axes[0].set_title("Noisy Input")
-    axes[0].set_xlabel("Time")
-    axes[0].set_ylabel("Position")
+    axes[0, 0].set_title("Noisy Input")
+    axes[0, 0].set_xlabel("Time")
+    axes[0, 0].set_ylabel("Position")
     
-    # Show denoised (use original scale for visualization)
+    # Top right: Denoised only (no track overlay)
     denoised_vis = denoised * (kymograph_max - kymograph_min) + kymograph_min
-    axes[1].imshow(
+    im = axes[0, 1].imshow(
+        denoised_vis.T,
+        aspect="auto",
+        origin="lower",
+        vmin=vmin,
+        vmax=vmax,
+        cmap="gray",
+    )
+    axes[0, 1].set_title("Denoised Output")
+    axes[0, 1].set_xlabel("Time")
+    axes[0, 1].set_ylabel("Position")
+    
+    # Bottom left: Denoised with track overlay
+    axes[1, 0].imshow(
         denoised_vis.T,
         aspect="auto",
         origin="lower",
@@ -238,17 +259,23 @@ def process_single_particle_file(
     # Plot track (convert from normalized to pixel coordinates for display)
     if not np.all(np.isnan(estimated_path)):
         track_plot = estimated_path * (kymograph_noisy.shape[1] - 1)
-        axes[1].plot(track_plot, color="red", lw=1.5, alpha=0.8, label="Track")
-    axes[1].set_title(f"Denoised & Tracked\nD={diffusion_processed:.4f} μm²/s")
-    axes[1].set_xlabel("Time")
-    axes[1].set_ylabel("Position")
-    axes[1].legend()
+        axes[1, 0].plot(track_plot, color="red", lw=1.5, alpha=0.8, label="Track")
+    axes[1, 0].set_title(f"Denoised & Tracked\nD={diffusion_processed:.4f} μm²/s")
+    axes[1, 0].set_xlabel("Time")
+    axes[1, 0].set_ylabel("Position")
+    axes[1, 0].legend()
     
-    axes[2].plot(estimated_path, color="blue", lw=1.0)
-    axes[2].set_title("Estimated Trajectory")
-    axes[2].set_xlabel("Time")
-    axes[2].set_ylabel("Position")
-    axes[2].grid(True, alpha=0.3)
+    # Bottom right: Estimated trajectory
+    if not np.all(np.isnan(estimated_path_pixels)):
+        axes[1, 1].plot(estimated_path_pixels, color="blue", lw=1.0)
+        axes[1, 1].set_title("Estimated Trajectory")
+        axes[1, 1].set_xlabel("Time")
+        axes[1, 1].set_ylabel("Position (pixels)")
+        axes[1, 1].grid(True, alpha=0.3)
+    else:
+        axes[1, 1].text(0.5, 0.5, "No valid trajectory", 
+                        ha='center', va='center', transform=axes[1, 1].transAxes)
+        axes[1, 1].set_title("Estimated Trajectory (No valid track)")
     
     plt.tight_layout()
     plt.savefig(metrics.figure_path, dpi=150, bbox_inches="tight")
