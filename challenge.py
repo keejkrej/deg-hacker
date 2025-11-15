@@ -122,23 +122,22 @@ def process_single_particle_file(
         model, kymograph_noisy_norm, device=device, chunk_size=512, overlap=64
     )
     
-    # Denormalize for analysis
-    denoised_original_scale = (
-        denoised * (kymograph_max - kymograph_min) + kymograph_min
-    )
+    # Diagnostic: check denoised output
+    print(f"  Denoised stats: min={denoised.min():.4f}, max={denoised.max():.4f}, mean={denoised.mean():.4f}, std={denoised.std():.4f}")
     
-    # Track particle - use find_max_subpixel on entire kymograph (more efficient)
+    # Track on normalized denoised (should be in [0,1] range)
+    # The model outputs normalized values, tracking should work on these
     from helpers import find_max_subpixel
     
     try:
         # find_max_subpixel expects 2D array and processes each row
-        estimated_path = find_max_subpixel(denoised_original_scale)
+        estimated_path = find_max_subpixel(denoised)
     except (ValueError, RuntimeError, IndexError) as e:
         # Fallback: process row by row manually
         print(f"  ⚠ Warning: find_max_subpixel failed, using manual tracking: {e}")
         estimated_path = []
-        for t in range(len(denoised_original_scale)):
-            row = denoised_original_scale[t]
+        for t in range(len(denoised)):
+            row = denoised[t]
             # Check if row is valid
             if np.all(np.isnan(row)) or np.all(row == 0) or (np.max(row) == np.min(row) and not np.isnan(row).any()):
                 estimated_path.append(np.nan)
@@ -226,15 +225,19 @@ def process_single_particle_file(
     axes[0].set_xlabel("Time")
     axes[0].set_ylabel("Position")
     
+    # Show denoised (use original scale for visualization)
+    denoised_vis = denoised * (kymograph_max - kymograph_min) + kymograph_min
     axes[1].imshow(
-        denoised_original_scale.T,
+        denoised_vis.T,
         aspect="auto",
         origin="lower",
         vmin=vmin,
         vmax=vmax,
         cmap="gray",
     )
-    axes[1].plot(estimated_path, color="red", lw=1.5, alpha=0.8, label="Track")
+    # Convert estimated_path to original scale if needed (it's in normalized [0,1] coordinates)
+    if not np.all(np.isnan(estimated_path)):
+        axes[1].plot(estimated_path, color="red", lw=1.5, alpha=0.8, label="Track")
     axes[1].set_title(f"Denoised & Tracked\nD={diffusion_processed:.4f} μm²/s")
     axes[1].set_xlabel("Time")
     axes[1].set_ylabel("Position")
