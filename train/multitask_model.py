@@ -489,8 +489,12 @@ def denoise_and_segment_chunked(
     
     # Process in chunks with overlap
     denoised = np.zeros((time_len, width), dtype=np.float32)
-    mask = np.zeros((time_len, width), dtype=np.float32)
+    mask = np.zeros((time_len, width), dtype=np.int64)  # Class labels
     weights = np.zeros((time_len, width), dtype=np.float32)
+    
+    # For majority voting: accumulate class votes
+    from collections import defaultdict
+    class_votes = defaultdict(lambda: np.zeros((time_len, width), dtype=np.float32))
     
     # Create window function for blending
     window = np.ones(chunk_size)
@@ -514,27 +518,36 @@ def denoise_and_segment_chunked(
             chunk_tensor = torch.from_numpy(chunk).unsqueeze(0).unsqueeze(0).float().to(device)
             pred_noise_chunk, pred_mask_logits_chunk = model(chunk_tensor)
             denoised_chunk = torch.clamp(chunk_tensor - pred_noise_chunk, 0.0, 1.0).squeeze().cpu().numpy()
-            # Convert logits to class predictions
-            mask_chunk = torch.argmax(pred_mask_logits_chunk, dim=1).squeeze().cpu().numpy()
+            # Convert logits to class probabilities for voting
+            pred_probs_chunk = torch.softmax(pred_mask_logits_chunk, dim=1).squeeze().cpu().numpy()  # [n_classes, H, W]
             
             # Extract actual size (remove padding)
             actual_len = end - start
             denoised_chunk = denoised_chunk[:actual_len]
-            mask_chunk = mask_chunk[:actual_len]
+            pred_probs_chunk = pred_probs_chunk[:, :actual_len, :]  # [n_classes, actual_len, width]
             window_chunk = window[:actual_len]
             
-            # Blend with window
+            # Blend denoised with window
             weight_chunk = window_chunk[:, np.newaxis]
             denoised[start:end] += denoised_chunk * weight_chunk
-            mask[start:end] += mask_chunk * weight_chunk
             weights[start:end] += weight_chunk
+            
+            # Accumulate class probabilities for voting
+            for c in range(pred_probs_chunk.shape[0]):
+                class_votes[c][start:end] += pred_probs_chunk[c] * weight_chunk
             
             # Move to next chunk
             start += chunk_size - overlap
     
-    # Normalize by weights
+    # Normalize denoised by weights
     denoised = np.divide(denoised, weights, out=np.zeros_like(denoised), where=weights > 0)
-    mask = np.divide(mask, weights, out=np.zeros_like(mask), where=weights > 0)
+    
+    # Majority voting: assign class with highest accumulated probability
+    for t in range(time_len):
+        for w in range(width):
+            if weights[t, w] > 0:
+                class_scores = [class_votes[c][t, w] / weights[t, w] for c in range(len(class_votes))]
+                mask[t, w] = np.argmax(class_scores)
     
     return denoised, mask
 
