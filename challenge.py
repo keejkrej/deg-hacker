@@ -17,7 +17,7 @@ import glob
 import numpy as np
 import torch
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from scipy.signal import find_peaks
 
 from multitask_model import load_multitask_model, denoise_and_segment_chunked, _default_device
@@ -28,6 +28,56 @@ from utils import (
     estimate_noise_and_contrast,
 )
 from helpers import estimate_diffusion_msd_fit, get_particle_radius
+
+
+def apply_segmentation_mask(
+    denoised: np.ndarray,
+    segmentation_mask: np.ndarray,
+    mask_threshold: float = 0.5,
+    dilation_size: Tuple[int, int] = (3, 3),
+    background_weight: float = 0.3,
+    gaussian_sigma: float = 1.0,
+) -> np.ndarray:
+    """
+    Apply segmentation mask to denoised kymograph to suppress background noise.
+    
+    Parameters:
+    -----------
+    denoised : np.ndarray
+        Denoised kymograph
+    segmentation_mask : np.ndarray
+        Probability map from segmentation head, values in [0, 1]
+    mask_threshold : float
+        Threshold for binary mask (default: 0.5)
+    dilation_size : Tuple[int, int]
+        Size of dilation kernel (time, space) to expand mask (default: (3, 3))
+    background_weight : float
+        Weight for background regions (0-1), lower = more suppression (default: 0.3)
+    gaussian_sigma : float
+        Sigma for Gaussian smoothing of mask edges (default: 1.0)
+    
+    Returns:
+    --------
+    denoised_masked : np.ndarray
+        Denoised kymograph with background suppressed
+    """
+    from scipy.ndimage import binary_dilation, gaussian_filter
+    
+    # Threshold mask to binary
+    mask_binary = (segmentation_mask > mask_threshold).astype(np.float32)
+    
+    # Dilate mask to make it slightly bigger
+    dilation_kernel = np.ones(dilation_size, dtype=bool)
+    mask_dilated = binary_dilation(mask_binary, structure=dilation_kernel).astype(np.float32)
+    
+    # Smooth transition at mask edges to avoid artifacts
+    mask_soft = gaussian_filter(mask_dilated, sigma=gaussian_sigma)
+    
+    # Apply mask: keep denoised values in mask regions, suppress background
+    # Weighted combination: mask regions keep full denoised, background is suppressed
+    denoised_masked = denoised * (mask_soft + (1 - mask_soft) * background_weight)
+    
+    return denoised_masked
 
 
 def estimate_n_particles(kymograph: np.ndarray, denoised: np.ndarray) -> int:
@@ -139,6 +189,19 @@ def process_single_particle_file(
     denoised, segmentation_mask = denoise_and_segment_chunked(
         model, kymograph_noisy_norm, device=device, chunk_size=512, overlap=64
     )
+    
+    # Apply segmentation mask to suppress background noise
+    mask_binary = (segmentation_mask > 0.5).astype(np.float32)
+    mask_dilated = (apply_segmentation_mask(
+        np.ones_like(segmentation_mask), segmentation_mask, dilation_size=(3, 3)
+    ) > 0.5).astype(np.float32)
+    
+    denoised = apply_segmentation_mask(
+        denoised, segmentation_mask, dilation_size=(3, 3), background_weight=0.3
+    )
+    
+    print(f"  Segmentation mask: {np.sum(mask_binary > 0):.0f} pixels ({100*np.mean(mask_binary):.1f}% of image)")
+    print(f"  After dilation: {np.sum(mask_dilated > 0):.0f} pixels ({100*np.mean(mask_dilated):.1f}% of image)")
     
     # Check background noise level (std of 0-80 percentile regions, outside tracks)
     # Only apply median filter if background noise is high
@@ -399,6 +462,19 @@ def process_multi_particle_file(
         model, kymograph_noisy_norm, device=device, chunk_size=512, overlap=64
     )
     
+    # Apply segmentation mask to suppress background noise
+    mask_binary = (segmentation_mask_norm > 0.5).astype(np.float32)
+    mask_dilated = (apply_segmentation_mask(
+        np.ones_like(segmentation_mask_norm), segmentation_mask_norm, dilation_size=(3, 3)
+    ) > 0.5).astype(np.float32)
+    
+    denoised_norm = apply_segmentation_mask(
+        denoised_norm, segmentation_mask_norm, dilation_size=(3, 3), background_weight=0.3
+    )
+    
+    print(f"  Segmentation mask: {np.sum(mask_binary > 0):.0f} pixels ({100*np.mean(mask_binary):.1f}% of image)")
+    print(f"  After dilation: {np.sum(mask_dilated > 0):.0f} pixels ({100*np.mean(mask_dilated):.1f}% of image)")
+    
     # Check background noise level (std of 0-80 percentile regions, outside tracks)
     # Only apply median filter if background noise is high
     background_mask = denoised_norm <= np.percentile(denoised_norm, 80)
@@ -480,9 +556,19 @@ def process_multi_particle_file(
             else:
                 denoised_norm_2 = np.clip(denoised_bg_sub, 0.0, 1.0)
             
-            denoised_norm, _ = denoise_and_segment_chunked(
+            denoised_norm, segmentation_mask_retry = denoise_and_segment_chunked(
                 model, denoised_norm_2, device=device, chunk_size=512, overlap=64
             )
+            
+            # Apply segmentation mask to suppress background noise
+            from scipy.ndimage import binary_dilation, gaussian_filter
+            mask_threshold = 0.5
+            mask_binary = (segmentation_mask_retry > mask_threshold).astype(np.float32)
+            dilation_kernel = np.ones((3, 3), dtype=bool)
+            mask_dilated = binary_dilation(mask_binary, structure=dilation_kernel).astype(np.float32)
+            mask_soft = gaussian_filter(mask_dilated, sigma=1.0)
+            mask_weight = 0.3
+            denoised_norm = denoised_norm * (mask_soft + (1 - mask_soft) * mask_weight)
             denoised = denoised_norm * (kymograph_max - kymograph_min) + kymograph_min + background_level
             
             # Retry tracking with lower threshold
