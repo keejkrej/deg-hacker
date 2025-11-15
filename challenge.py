@@ -149,14 +149,25 @@ def process_single_particle_file(
     contrast_improvement = contrast_denoised / max(contrast_input, 1e-6)
     noise_reduction = noise_denoised / max(noise_input, 1e-6)
     
-    # Run again if: contrast improved significantly (>1.5x) but noise reduction is modest (<0.7x)
-    # and noise level is still relatively high (>0.05)
+    # Diagnostic: print criteria check
+    print(f"  Denoising criteria check:")
+    print(f"    Contrast improvement: {contrast_improvement:.2f}x (need >1.2)")
+    print(f"    Noise reduction ratio: {noise_reduction:.2f}x (need >0.6, means {noise_reduction*100:.0f}% of noise remains)")
+    print(f"    Noise level: {noise_denoised:.4f} (need >0.03)")
+    
+    # Run again if: contrast improved significantly (>1.2x) but noise reduction is modest (>0.6x)
+    # and noise level is still relatively high (>0.03)
+    # Relaxed criteria: lower thresholds to trigger more often for challenging cases
     max_iterations = 2
     iteration = 1
-    while (iteration < max_iterations and 
-           contrast_improvement > 1.5 and 
-           noise_reduction > 0.7 and 
-           noise_denoised > 0.05):
+    should_rerun = (contrast_improvement > 1.2 and 
+                    noise_reduction > 0.6 and 
+                    noise_denoised > 0.03)
+    
+    if should_rerun:
+        print(f"  ✓ Criteria met for iterative denoising")
+    
+    while (iteration < max_iterations and should_rerun):
         print(f"  Iteration {iteration + 1}: Contrast improved {contrast_improvement:.2f}x, but noise reduction only {noise_reduction:.2f}x")
         print(f"    Running denoiser again...")
         
@@ -177,6 +188,11 @@ def process_single_particle_file(
         noise_denoised, contrast_denoised = estimate_noise_and_contrast(denoised)
         contrast_improvement = contrast_denoised / max(contrast_input, 1e-6)
         noise_reduction = noise_denoised / max(noise_input, 1e-6)
+        
+        # Check if we should continue
+        should_rerun = (contrast_improvement > 1.2 and 
+                        noise_reduction > 0.6 and 
+                        noise_denoised > 0.03)
         iteration += 1
     
     if iteration > 1:
