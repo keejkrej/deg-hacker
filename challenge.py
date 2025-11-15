@@ -166,14 +166,14 @@ def process_single_particle_file(
         print(f"  ⚠ Warning: Too few valid points ({np.sum(valid_path)}), using NaN for diffusion")
         diffusion_processed = np.nan
         radius_processed = np.nan
-    elif np.std(estimated_path[valid_path]) < 0.1:
-        print(f"  ⚠ Warning: Path has no variation (std={np.std(estimated_path[valid_path]):.4f}), using NaN for diffusion")
+    elif np.std(estimated_path_pixels[valid_path]) < 0.1:
+        print(f"  ⚠ Warning: Path has no variation (std={np.std(estimated_path_pixels[valid_path]):.4f}), using NaN for diffusion")
         diffusion_processed = np.nan
         radius_processed = np.nan
     else:
         # Estimate diffusion coefficient with error handling
         try:
-            diffusion_processed = estimate_diffusion_msd_fit(estimated_path)
+            diffusion_processed = estimate_diffusion_msd_fit(estimated_path_pixels)
             if np.isnan(diffusion_processed) or diffusion_processed <= 0:
                 print(f"  ⚠ Warning: Invalid diffusion estimate ({diffusion_processed}), using NaN")
                 diffusion_processed = np.nan
