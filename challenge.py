@@ -555,7 +555,7 @@ def process_multi_particle_file(
                     family='monospace')
     
     plt.tight_layout()
-    figure_path = f"{output_dir}/multi_{Path(filepath).stem}_overview.png"
+    figure_path = f"{output_dir}/multi_particle_{Path(filepath).stem}_overview.png"
     plt.savefig(figure_path, dpi=150, bbox_inches="tight")
     plt.close()
     

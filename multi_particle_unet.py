@@ -655,14 +655,20 @@ def summarize_multi_particle_analysis(
     # Create comprehensive figure
     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
     
+    # Use percentile-based ranges to be robust to outliers (consistent with utils.py)
+    vmin_noisy = np.percentile(simulation.kymograph_noisy, 1)
+    vmax_noisy = np.percentile(simulation.kymograph_noisy, 99)
+    vmin_denoised = np.percentile(denoised_kymograph, 1)
+    vmax_denoised = np.percentile(denoised_kymograph, 99)
+    
     # Top left: Noisy kymograph with true paths
     axes[0, 0].imshow(
         simulation.kymograph_noisy.T,
         aspect="auto",
         origin="lower",
         extent=[0, simulation.n_t, 0, simulation.n_x],
-        vmin=0,
-        vmax=0.5,
+        vmin=vmin_noisy,
+        vmax=vmax_noisy,
         cmap="gray",
     )
     axes[0, 0].set_title("Noisy Kymograph")
@@ -681,8 +687,8 @@ def summarize_multi_particle_analysis(
         aspect="auto",
         origin="lower",
         extent=[0, simulation.n_t, 0, simulation.n_x],
-        vmin=0,
-        vmax=0.5,
+        vmin=vmin_denoised,
+        vmax=vmax_denoised,
         cmap="gray",
     )
     axes[0, 1].set_title(f"{method_label} Kymograph")
