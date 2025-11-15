@@ -69,17 +69,16 @@ def denoise_kymograph_chunked(
                 mode="constant",
                 constant_values=0,
             )
-            denoised_padded = model(
-                torch.from_numpy(padded[None, None, :, :])
-                .float()
-                .to(device)
-            ).cpu().numpy()[0, 0]
+            # DDPM-style: predict noise, then subtract
+            padded_tensor = torch.from_numpy(padded[None, None, :, :]).float().to(device)
+            predicted_noise = model(padded_tensor)
+            denoised_padded = torch.clamp(padded_tensor - predicted_noise, 0.0, 1.0).cpu().numpy()[0, 0]
             return denoised_padded[:, :width]
         else:
-            # Process directly
-            denoised = model(
-                torch.from_numpy(kymograph[None, None, :, :]).float().to(device)
-            ).cpu().numpy()[0, 0]
+            # Process directly (DDPM-style: predict noise, then subtract)
+            kymograph_tensor = torch.from_numpy(kymograph[None, None, :, :]).float().to(device)
+            predicted_noise = model(kymograph_tensor)
+            denoised = torch.clamp(kymograph_tensor - predicted_noise, 0.0, 1.0).cpu().numpy()[0, 0]
             return denoised
     
     # Process in chunks
@@ -109,12 +108,13 @@ def denoise_kymograph_chunked(
                         constant_values=0,
                     )
                 
-                # Denoise chunk
+                # Denoise chunk (DDPM-style: predict noise, then subtract)
                 with torch.no_grad():
                     chunk_tensor = (
                         torch.from_numpy(chunk[None, None, :, :]).float().to(device)
                     )
-                    denoised_chunk = model(chunk_tensor).cpu().numpy()[0, 0]
+                    predicted_noise = model(chunk_tensor)
+                    denoised_chunk = torch.clamp(chunk_tensor - predicted_noise, 0.0, 1.0).cpu().numpy()[0, 0]
                 
                 # Remove padding
                 denoised_chunk = denoised_chunk[: t_end - t_start, : x_end - x_start]
@@ -152,12 +152,13 @@ def denoise_kymograph_chunked(
                     constant_values=0,
                 )
             
-            # Denoise chunk
+            # Denoise chunk (DDPM-style: predict noise, then subtract)
             with torch.no_grad():
                 chunk_tensor = (
                     torch.from_numpy(chunk[None, None, :, :]).float().to(device)
                 )
-                denoised_chunk = model(chunk_tensor).cpu().numpy()[0, 0]
+                predicted_noise = model(chunk_tensor)
+                denoised_chunk = torch.clamp(chunk_tensor - predicted_noise, 0.0, 1.0).cpu().numpy()[0, 0]
             
             # Remove padding
             denoised_chunk = denoised_chunk[: t_end - t_start, :]
