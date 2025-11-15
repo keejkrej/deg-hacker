@@ -229,7 +229,7 @@ class TestChunkedProcessing:
     
     def test_chunked_processing_large(self, test_model):
         """Test chunked processing for large kymographs."""
-        from one_particle_unet import denoise_kymograph_chunked
+        from single_particle_unet import denoise_kymograph_chunked
         
         model = load_model(test_model, base_channels=16, use_residual=True)
         
@@ -243,7 +243,7 @@ class TestChunkedProcessing:
     
     def test_chunked_processing_small(self, test_model):
         """Test chunked processing for small kymographs (padding)."""
-        from one_particle_unet import denoise_kymograph_chunked
+        from single_particle_unet import denoise_kymograph_chunked
         
         model = load_model(test_model, base_channels=16, use_residual=True)
         
@@ -257,7 +257,7 @@ class TestChunkedProcessing:
     
     def test_chunked_processing_2d(self, test_model):
         """Test 2D chunking for very large kymographs."""
-        from one_particle_unet import denoise_kymograph_chunked
+        from single_particle_unet import denoise_kymograph_chunked
         
         model = load_model(test_model, base_channels=16, use_residual=True)
         

@@ -78,7 +78,6 @@ deg-hacker/
 ├── multi_particle_unet.py   # Multi-particle tracking and analysis
 ├── helpers.py               # Utility functions (do not modify)
 ├── utils.py                 # Analysis utilities and data structures
-├── visualize_multi_track.py # Multi-track visualization
 ├── tests/                   # Comprehensive test suite
 ├── models/                  # Trained model checkpoints
 ├── figures/                 # Generated analysis figures
@@ -124,16 +123,18 @@ run_parameter_grid(
 )
 ```
 
-### Visualize Multi-Track Denoising
+### Visualize Denoising Results
+
+After training, denoising results are automatically visualized. You can also call:
 
 ```python
-from visualize_multi_track import visualize_multi_track_denoising_results
+from denoiser import visualize_denoising_results, load_model
 
-visualize_multi_track_denoising_results(
-    model_path="models/tiny_unet_denoiser.pth",
-    n_samples=3
-)
+model = load_model("models/tiny_unet_denoiser.pth")
+visualize_denoising_results(model, n_samples=3)
 ```
+
+Multi-particle analysis automatically generates diagnostic plots in `figures/multi_unet/`.
 
 ## Testing
 
