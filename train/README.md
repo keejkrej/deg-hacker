@@ -43,7 +43,7 @@ config = MultiTaskConfig(
     denoise_loss_weight=1.0,  # Weight for denoising loss
     segment_loss_weight=1.0, # Weight for segmentation loss
     denoise_loss="l2",        # "l2" or "l1" for denoising
-    segment_loss="ce",        # "ce" (CrossEntropy) or "dice" for segmentation
+    segment_loss="bce",        # "bce" (BinaryCrossEntropy) or "dice" for binary segmentation
     use_gradient_clipping=True,
     max_grad_norm=1.0,
     use_lr_scheduler=True,
@@ -118,7 +118,7 @@ config = MultiTaskConfig(
 - `denoise_loss_weight`: Weight for denoising loss component
 - `segment_loss_weight`: Weight for segmentation loss component
 - `denoise_loss`: "l2" (MSE) or "l1" (MAE)
-- `segment_loss`: "ce" (CrossEntropy) or "dice" (Dice loss)
+- `segment_loss`: "bce" (BinaryCrossEntropy) or "dice" (Dice loss for binary)
 - `use_gradient_clipping`: Enable gradient clipping (default: True)
 - `max_grad_norm`: Maximum gradient norm for clipping (default: 1.0)
 - `use_lr_scheduler`: Enable learning rate scheduling (default: True)
@@ -132,7 +132,7 @@ The `MultiTaskUNet` model:
 - **Base channels**: 48 (configurable via `base_channels` parameter)
 - **Output heads**:
   1. Denoising head: Predicts noise to subtract (DDPM-style)
-  2. Segmentation head: Predicts multi-class labels (background + tracks)
+  2. Segmentation head: Predicts binary mask (background vs particle)
 
 ## Output
 

@@ -98,34 +98,33 @@ def visualize_training_example(
     axes[0, 2].set_xlabel("Time")
     axes[0, 2].set_ylabel("Position")
     
-    # Row 2: Segmentation masks
-    # Ground truth segmentation labels
+    # Row 2: Segmentation masks (binary)
+    # Ground truth binary mask
     im1 = axes[1, 0].imshow(true_mask.T, aspect="auto", origin="lower",
-                           cmap="tab10", vmin=0, vmax=3, interpolation="nearest")
-    axes[1, 0].set_title("Ground Truth Segmentation Labels")
+                           cmap="gray", vmin=0, vmax=1, interpolation="nearest")
+    axes[1, 0].set_title("Ground Truth Binary Mask")
     axes[1, 0].set_xlabel("Time")
     axes[1, 0].set_ylabel("Position")
-    plt.colorbar(im1, ax=axes[1, 0], label="Class (0=bg, 1-3=tracks)")
+    plt.colorbar(im1, ax=axes[1, 0], label="Mask (0=bg, 1=particle)")
     
-    # Predicted segmentation labels
+    # Predicted binary mask
     im2 = axes[1, 1].imshow(segmentation_labels.T, aspect="auto", origin="lower",
-                           cmap="tab10", vmin=0, vmax=3, interpolation="nearest")
-    axes[1, 1].set_title("Predicted Segmentation Labels")
+                           cmap="gray", vmin=0, vmax=1, interpolation="nearest")
+    axes[1, 1].set_title("Predicted Binary Mask")
     axes[1, 1].set_xlabel("Time")
     axes[1, 1].set_ylabel("Position")
-    plt.colorbar(im2, ax=axes[1, 1], label="Class (0=bg, 1-3=tracks)")
+    plt.colorbar(im2, ax=axes[1, 1], label="Mask (0=bg, 1=particle)")
     
     # Error/difference
     if show_segmentation_labels:
-        # Show per-class masks
-        n_classes = int(max(true_mask.max(), segmentation_labels.max())) + 1
-        error_mask = (true_mask != segmentation_labels).astype(float)
+        # Show binary mask error
+        error_mask = np.abs(true_mask - segmentation_labels)
         im3 = axes[1, 2].imshow(error_mask.T, aspect="auto", origin="lower",
                                cmap="Reds", vmin=0, vmax=1)
         axes[1, 2].set_title("Segmentation Error\n(Red = Mismatch)")
         axes[1, 2].set_xlabel("Time")
         axes[1, 2].set_ylabel("Position")
-        plt.colorbar(im3, ax=axes[1, 2], label="Error")
+        plt.colorbar(im3, ax=axes[1, 2], label="Absolute Error")
     else:
         # Show denoising error
         denoising_error = np.abs(gt_denoised - denoised)
@@ -151,27 +150,31 @@ def visualize_training_example(
     print(f"    Denoising MAE: {np.mean(np.abs(gt_denoised - denoised)):.4f}")
     print(f"    Denoising RMSE: {np.sqrt(np.mean((gt_denoised - denoised)**2)):.4f}")
     
-    # Segmentation statistics
-    unique_true = np.unique(true_mask)
-    unique_pred = np.unique(segmentation_labels)
-    print(f"    GT classes: {unique_true}")
-    print(f"    Pred classes: {unique_pred}")
+    # Segmentation statistics (binary)
+    # Threshold predicted mask at 0.5 for binary comparison
+    pred_binary = (segmentation_labels > 0.5).astype(np.float32)
+    true_binary = (true_mask > 0.5).astype(np.float32)
     
-    # Per-class accuracy
-    if len(unique_true) > 1:  # Not just background
-        correct = (true_mask == segmentation_labels).sum()
-        total = true_mask.size
-        accuracy = correct / total
-        print(f"    Segmentation accuracy: {accuracy:.3f} ({correct}/{total})")
-        
-        # Per-class accuracy
-        for c in unique_true:
-            if c > 0:  # Skip background
-                mask_c = (true_mask == c)
-                if mask_c.sum() > 0:
-                    pred_correct = ((segmentation_labels == c) & mask_c).sum()
-                    class_acc = pred_correct / mask_c.sum()
-                    print(f"      Class {c} accuracy: {class_acc:.3f}")
+    correct = (true_binary == pred_binary).sum()
+    total = true_mask.size
+    accuracy = correct / total
+    print(f"    Segmentation accuracy: {accuracy:.3f} ({correct}/{total})")
+    
+    # Binary classification metrics
+    true_positives = ((true_binary == 1) & (pred_binary == 1)).sum()
+    false_positives = ((true_binary == 0) & (pred_binary == 1)).sum()
+    false_negatives = ((true_binary == 1) & (pred_binary == 0)).sum()
+    true_negatives = ((true_binary == 0) & (pred_binary == 0)).sum()
+    
+    if (true_positives + false_positives) > 0:
+        precision = true_positives / (true_positives + false_positives)
+        print(f"    Precision: {precision:.3f}")
+    
+    if (true_positives + false_negatives) > 0:
+        recall = true_positives / (true_positives + false_negatives)
+        print(f"    Recall: {recall:.3f}")
+    
+    print(f"    Mask coverage: {100*np.mean(true_binary):.1f}% (GT), {100*np.mean(pred_binary):.1f}% (Pred)")
 
 
 def visualize_training_set(

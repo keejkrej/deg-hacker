@@ -56,7 +56,7 @@ def _select_peak_candidates(row, max_candidates):
 
 def _detect_particles_clustering(row, n_particles, min_separation=5.0):
     """
-    Detect particles in a time slice using Otsu binarization and clustering.
+    Detect particles in a time slice using direct peak detection (no thresholding).
     
     Parameters:
     -----------
@@ -77,56 +77,57 @@ def _detect_particles_clustering(row, n_particles, min_separation=5.0):
     if len(row) == 0:
         return np.array([]), np.array([])
     
-    # Binarize using Otsu's method (optimal for denoised data)
-    try:
-        threshold = threshold_otsu(row)
-    except ValueError:
-        # Fallback if Otsu fails (e.g., constant array)
-        threshold = np.median(row)
+    # Use direct peak detection - no thresholding needed (data already has high contrast)
+    # Clip at zero to ensure no negative values
+    row = np.clip(row, 0, None)
     
-    binary = row > threshold
+    # Find local maxima as particle candidates
+    from scipy.signal import find_peaks
     
-    if not np.any(binary):
-        # No pixels above threshold - return empty
+    # Find peaks with minimum separation only (no height threshold)
+    # Data already has high contrast, so just use distance
+    # For masked data (mostly zeros), use very low or no prominence
+    row_std = np.std(row)
+    row_max = np.max(row)
+    
+    # Use very low prominence or none at all for masked data
+    # If most pixels are zero, std will be low, so use a fraction of max instead
+    prominence_threshold = min(row_std * 0.1, row_max * 0.05) if row_max > 0 else 0
+    
+    # Find peaks with minimum separation - very permissive prominence
+    peaks, properties = find_peaks(
+        row,
+        distance=int(min_separation),
+        prominence=prominence_threshold,  # Very low prominence for masked data
+    )
+    
+    if len(peaks) == 0:
         return np.array([]), np.array([])
     
-    # Find connected components (particle blobs)
-    labeled_array, num_features = label(binary)
+    # Get peak positions and scores (intensities)
+    positions = peaks.astype(float)
+    scores = row[peaks]
     
-    if num_features == 0:
-        return np.array([]), np.array([])
+    # Refine positions using subpixel interpolation for better accuracy
+    refined_positions = []
+    for peak_idx in peaks:
+        if peak_idx == 0 or peak_idx == len(row) - 1:
+            refined_positions.append(float(peak_idx))
+        else:
+            # Parabolic interpolation for subpixel accuracy
+            y0, y1, y2 = row[peak_idx - 1], row[peak_idx], row[peak_idx + 1]
+            denom = (y0 - 2 * y1 + y2)
+            if abs(denom) < 1e-10:
+                refined_positions.append(float(peak_idx))
+            else:
+                delta = 0.5 * (y0 - y2) / denom
+                refined_positions.append(float(peak_idx) + delta)
     
-    # Get center of mass for each connected component
-    positions = []
-    scores = []
-    
-    for label_id in range(1, num_features + 1):
-        mask = labeled_array == label_id
-        if np.sum(mask) == 0:
-            continue
-        
-        # Center of mass (weighted by intensity)
-        com = center_of_mass(row, labels=labeled_array, index=label_id)
-        if np.isnan(com[0]):
-            continue
-        
-        pos = float(com[0])
-        # Score is max intensity in this component
-        score = np.max(row[mask])
-        
-        positions.append(pos)
-        scores.append(score)
-    
-    if len(positions) == 0:
-        return np.array([]), np.array([])
-    
-    positions = np.array(positions)
-    scores = np.array(scores)
+    positions = np.array(refined_positions)
     
     # If we have more detections than expected particles, use clustering to merge nearby ones
     if len(positions) > n_particles:
         # Use DBSCAN to cluster nearby detections
-        # Reshape for sklearn (needs 2D array)
         positions_2d = positions.reshape(-1, 1)
         
         # eps = min_separation, min_samples = 1 (each detection is a cluster)

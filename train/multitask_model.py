@@ -71,13 +71,13 @@ class MultiTaskUNet(nn.Module):
     - Shared encoder-decoder backbone
     - Two output heads:
       1. Denoising head: predicts noise (DDPM-style)
-      2. Segmentation head: predicts multi-class labels (n_tracks + background)
+      2. Segmentation head: predicts binary mask (particle vs background)
     """
     
     def __init__(self, base_channels: int = 48, use_bn: bool = True, max_tracks: int = 3) -> None:
         super().__init__()
         self.max_tracks = max_tracks
-        self.n_classes = max_tracks + 1  # max_tracks + background (class 0)
+        # Binary segmentation: 0 = background, 1 = particle (any track)
         
         # Shared encoder
         self.enc1 = ConvBlock(1, base_channels, use_bn=use_bn)
@@ -104,9 +104,9 @@ class MultiTaskUNet(nn.Module):
         nn.init.xavier_uniform_(self.denoise_head.weight, gain=0.1)
         nn.init.constant_(self.denoise_head.bias, 0.0)
         
-        # Head 2: Segmentation (predicts class logits, no activation - use CrossEntropyLoss)
-        # Output: n_classes channels (background=0, track1=1, track2=2, track3=3)
-        self.segment_head = nn.Conv2d(base_channels, self.n_classes, kernel_size=1)
+        # Head 2: Segmentation (predicts binary logits, no activation - use BCEWithLogitsLoss)
+        # Output: 1 channel (binary: 0=background, 1=particle)
+        self.segment_head = nn.Conv2d(base_channels, 1, kernel_size=1)
         nn.init.xavier_uniform_(self.segment_head.weight, gain=1.0)
         nn.init.constant_(self.segment_head.bias, 0.0)
     
@@ -138,23 +138,23 @@ class MultiTaskUNet(nn.Module):
         
         # Two output heads
         predicted_noise = self.denoise_head(d1)  # No activation (can be positive/negative)
-        segmentation_logits = self.segment_head(d1)  # Class logits: [B, n_classes, H, W]
+        segmentation_logits = self.segment_head(d1)  # Binary logits: [B, 1, H, W]
         
         return predicted_noise, segmentation_logits
 
 
 def create_segmentation_mask(paths: np.ndarray, shape: Tuple[int, int], 
                              peak_width_samples: float = 2.0, max_tracks: int = 3) -> np.ndarray:
-    """Create multi-class segmentation mask from particle paths.
+    """Create binary segmentation mask from particle paths.
     
     Returns:
     --------
     mask : np.ndarray
-        Class labels: 0=background, 1=track1, 2=track2, 3=track3
-        Shape: (length, width), dtype: int64
+        Binary labels: 0=background, 1=particle (any track)
+        Shape: (length, width), dtype: float32
     """
     length, width = shape
-    mask = np.zeros((length, width), dtype=np.int64)  # Background = 0
+    mask = np.zeros((length, width), dtype=np.float32)  # Background = 0
     
     # Handle single particle case
     if paths.ndim == 1:
@@ -169,15 +169,13 @@ def create_segmentation_mask(paths: np.ndarray, shape: Tuple[int, int],
             if not np.isnan(pos):
                 # Create Gaussian around particle position
                 gaussian = np.exp(-0.5 * ((xs - pos) / peak_width_samples) ** 2)
-                # Assign class label: track i gets class i+1 (class 0 is background)
-                track_class = i + 1
-                # Only assign if Gaussian is strong enough and not already assigned to a higher priority track
-                # Priority: earlier tracks (lower index) have priority
+                # Assign to binary mask: any particle location gets value 1
                 mask_indices = gaussian > 0.1  # Threshold for assignment
-                # Only assign where mask is still background (0) or where this track's Gaussian is stronger
-                for x_idx in np.where(mask_indices)[0]:
-                    if mask[t, x_idx] == 0 or gaussian[x_idx] > 0.5:  # Override if strong enough
-                        mask[t, x_idx] = track_class
+                # Use maximum to combine multiple particles at same location
+                mask[t, mask_indices] = np.maximum(mask[t, mask_indices], gaussian[mask_indices])
+    
+    # Binarize: threshold at 0.1 to get binary mask
+    mask = (mask > 0.1).astype(np.float32)
     
     return mask
 
@@ -267,7 +265,7 @@ class MultiTaskDataset(Dataset):
         # Compute true noise (for denoising task)
         true_noise = noisy - gt
         
-        # Create segmentation mask (for segmentation task) - multi-class labels
+        # Create segmentation mask (for segmentation task) - binary mask
         peak_width_samples = self.peak_width / self.dx
         mask = create_segmentation_mask(
             paths,
@@ -279,7 +277,7 @@ class MultiTaskDataset(Dataset):
         # Convert to tensors
         noisy_tensor = torch.from_numpy(noisy).unsqueeze(0).float()
         noise_tensor = torch.from_numpy(true_noise).unsqueeze(0).float()
-        mask_tensor = torch.from_numpy(mask).long()  # Long tensor for class labels
+        mask_tensor = torch.from_numpy(mask).float()  # Float tensor for binary mask
         
         return noisy_tensor, noise_tensor, mask_tensor
 
@@ -293,7 +291,7 @@ class MultiTaskConfig:
     denoise_loss_weight: float = 1.0  # Weight for denoising loss
     segment_loss_weight: float = 1.0  # Weight for segmentation loss
     denoise_loss: str = "l2"  # "l2" or "l1"
-    segment_loss: str = "ce"  # "ce" (CrossEntropy with Hungarian matching) or "dice" (Dice for multi-class)
+    segment_loss: str = "bce"  # "bce" (BinaryCrossEntropy) or "dice" (Dice for binary)
     use_gradient_clipping: bool = True
     max_grad_norm: float = 1.0
     use_lr_scheduler: bool = True
@@ -301,7 +299,8 @@ class MultiTaskConfig:
     checkpoint_dir: Optional[str] = None  # Directory to save checkpoints (None = don't save)
     save_best: bool = True  # Save best model based on total loss
     checkpoint_every: int = 1  # Save checkpoint every N epochs (1 = every epoch)
-    segment_class_weights: Optional[Tuple[float, ...]] = None  # Class weights for segmentation (None = auto)
+    segment_class_weights: Optional[Tuple[float, ...]] = None  # Deprecated: kept for compatibility, use pos_weight instead
+    segment_pos_weight: Optional[float] = None  # Positive class weight for binary segmentation (None = auto, default 3.0)
     resume_from: Optional[str] = None  # Path to checkpoint to resume training from (None = auto-detect latest)
     resume_epoch: Optional[int] = None  # Epoch number to resume from (if None, inferred from checkpoint)
     auto_resume: bool = True  # Automatically resume from latest checkpoint if available
@@ -464,38 +463,29 @@ def hungarian_matching_loss(
     return total_loss / n_valid_samples
 
 
-def dice_loss_multiclass(pred: torch.Tensor, target: torch.Tensor, n_classes: int, smooth: float = 1e-6) -> torch.Tensor:
-    """Multi-class Dice loss for segmentation.
+def dice_loss_binary(pred: torch.Tensor, target: torch.Tensor, smooth: float = 1e-6) -> torch.Tensor:
+    """Binary Dice loss for segmentation.
     
     Parameters:
     -----------
     pred : torch.Tensor
-        Class logits [B, n_classes, H, W]
+        Binary logits [B, 1, H, W]
     target : torch.Tensor
-        Class labels [B, H, W] with values in [0, n_classes-1]
-    n_classes : int
-        Number of classes
+        Binary labels [B, H, W] with values in [0, 1]
     """
-    # Convert logits to probabilities
-    pred_probs = torch.softmax(pred, dim=1)  # [B, n_classes, H, W]
+    # Convert logits to probabilities using sigmoid
+    pred_probs = torch.sigmoid(pred)  # [B, 1, H, W]
     
-    # One-hot encode target
-    target_one_hot = torch.zeros_like(pred_probs)
-    target_one_hot.scatter_(1, target.unsqueeze(1), 1.0)  # [B, n_classes, H, W]
+    # Flatten
+    pred_flat = pred_probs.view(-1)
+    target_flat = target.view(-1)
     
-    # Compute Dice for each class and average
-    dice_scores = []
-    for c in range(n_classes):
-        pred_c = pred_probs[:, c].view(-1)
-        target_c = target_one_hot[:, c].view(-1)
-        
-        intersection = (pred_c * target_c).sum()
-        dice = (2.0 * intersection + smooth) / (pred_c.sum() + target_c.sum() + smooth)
-        dice_scores.append(dice)
+    # Compute Dice
+    intersection = (pred_flat * target_flat).sum()
+    dice = (2.0 * intersection + smooth) / (pred_flat.sum() + target_flat.sum() + smooth)
     
-    # Return average Dice loss (1 - dice)
-    mean_dice = torch.stack(dice_scores).mean()
-    return 1.0 - mean_dice
+    # Return Dice loss (1 - dice)
+    return 1.0 - dice
 
 
 def _find_latest_checkpoint(checkpoint_dir: str) -> Optional[str]:
@@ -559,7 +549,7 @@ def train_multitask_model(
     
     if checkpoint_path and os.path.exists(checkpoint_path):
         print(f"\n📂 Resuming training from checkpoint: {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path, map_location=config.device)
+        checkpoint = torch.load(checkpoint_path, map_location=config.device, weights_only=False)
         
         # Handle both old format (just state_dict) and new format (full checkpoint)
         if 'model_state_dict' in checkpoint:
@@ -596,25 +586,23 @@ def train_multitask_model(
     else:
         raise ValueError(f"Unknown denoise loss: {config.denoise_loss}")
     
-    if config.segment_loss == "ce":
-        # Use weighted CrossEntropyLoss to handle class imbalance
-        # Background (class 0) is much more common, so we need to weight foreground classes higher
-        if config.segment_class_weights is not None:
-            class_weights = torch.tensor(config.segment_class_weights, device=config.device, dtype=torch.float32)
+    if config.segment_loss == "bce":
+        # Use BinaryCrossEntropyWithLogitsLoss to handle class imbalance
+        # Background is much more common, so we need to weight foreground higher
+        if config.segment_pos_weight is not None:
+            pos_weight_val = config.segment_pos_weight
+        elif config.segment_class_weights is not None and len(config.segment_class_weights) > 1:
+            # Legacy support: use second element if tuple provided
+            pos_weight_val = config.segment_class_weights[1]
         else:
-            # Auto-compute: down-weight background, up-weight tracks
-            # Background typically ~60-80% of pixels, tracks ~5-15% each
-            class_weights = torch.ones(model.n_classes, device=config.device, dtype=torch.float32)
-            class_weights[0] = 0.1  # Down-weight background (most common)
-            class_weights[1:] = 3.0  # Up-weight track classes (rare but important)
-        print(f"  Segmentation class weights: {class_weights.cpu().numpy()}")
-        base_criterion = nn.CrossEntropyLoss(weight=class_weights)
-        # Wrap with Hungarian matching for instance segmentation
-        segment_criterion = lambda pred, target: hungarian_matching_loss(
-            pred, target, model.n_classes, base_criterion
-        )
+            # Auto-compute: up-weight foreground (particles are rare but important)
+            # Background typically ~60-80% of pixels, particles ~20-40%
+            pos_weight_val = 3.0  # Up-weight particles
+        pos_weight = torch.tensor([pos_weight_val], device=config.device, dtype=torch.float32)
+        print(f"  Segmentation pos_weight: {pos_weight.cpu().numpy()}")
+        segment_criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     elif config.segment_loss == "dice":
-        segment_criterion = lambda pred, target: dice_loss_multiclass(pred, target, model.n_classes)
+        segment_criterion = lambda pred, target: dice_loss_binary(pred, target)
     else:
         raise ValueError(f"Unknown segment loss: {config.segment_loss}")
     
@@ -694,11 +682,14 @@ def train_multitask_model(
             
             # Compute losses
             denoise_loss = denoise_criterion(pred_noise, true_noise)
-            if config.segment_loss == "ce":
-                # CrossEntropyLoss expects: pred [B, C, H, W], target [B, H, W] with class indices
-                segment_loss = segment_criterion(pred_mask_logits, true_mask.squeeze(1))
+            if config.segment_loss == "bce":
+                # BCEWithLogitsLoss expects: pred [B, 1, H, W], target [B, H, W] with values in [0, 1]
+                segment_loss = segment_criterion(pred_mask_logits.squeeze(1), true_mask)
             elif config.segment_loss == "dice":
-                segment_loss = segment_criterion(pred_mask_logits, true_mask.squeeze(1))
+                # Dice loss expects: pred [B, 1, H, W], target [B, H, W] with values in [0, 1]
+                segment_loss = segment_criterion(pred_mask_logits, true_mask)
+            else:
+                raise ValueError(f"Unknown segment loss: {config.segment_loss}")
             
             # Combined loss
             total_loss = (
@@ -788,12 +779,27 @@ def save_multitask_model(model: MultiTaskUNet, path: str) -> None:
 
 
 def load_multitask_model(path: str, device: str = None, max_tracks: int = 3) -> MultiTaskUNet:
-    """Load multi-task model."""
+    """Load multi-task model.
+    
+    Handles both formats:
+    - Checkpoint format: dict with 'model_state_dict' key
+    - Model format: direct state_dict
+    """
     if device is None:
         device = _default_device()
     
     model = MultiTaskUNet(base_channels=48, use_bn=True, max_tracks=max_tracks).to(device)
-    model.load_state_dict(torch.load(path, map_location=device))
+    # Load checkpoint (weights_only=False for compatibility with checkpoints containing custom classes)
+    checkpoint = torch.load(path, map_location=device, weights_only=False)
+    
+    # Handle both checkpoint format and direct state_dict format
+    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+        # Checkpoint format: extract model_state_dict
+        model.load_state_dict(checkpoint['model_state_dict'])
+    else:
+        # Direct state_dict format
+        model.load_state_dict(checkpoint)
+    
     model.eval()
     return model
 
@@ -811,9 +817,9 @@ def denoise_and_segment_chunked(
     --------
     denoised : np.ndarray
         Denoised kymograph, shape (time, width)
-    segmentation_labels : np.ndarray
-        Class labels, shape (time, width), values in [0, n_classes-1]
-        where 0=background, 1=track1, 2=track2, 3=track3
+    segmentation_mask : np.ndarray
+        Binary mask, shape (time, width), values in [0, 1]
+        where 0=background, 1=particle (any track)
     """
     if device is None:
         device = _default_device()
@@ -827,18 +833,14 @@ def denoise_and_segment_chunked(
             input_tensor = torch.from_numpy(kymograph).unsqueeze(0).unsqueeze(0).float().to(device)
             pred_noise, pred_mask_logits = model(input_tensor)
             denoised = torch.clamp(input_tensor - pred_noise, 0.0, 1.0).squeeze().cpu().numpy()
-            # Convert logits to class predictions
-            pred_classes = torch.argmax(pred_mask_logits, dim=1).squeeze().cpu().numpy().astype(np.int64)
-        return denoised, pred_classes
+            # Convert logits to binary mask using sigmoid
+            pred_mask = torch.sigmoid(pred_mask_logits).squeeze().cpu().numpy().astype(np.float32)
+        return denoised, pred_mask
     
     # Process in chunks with overlap
     denoised = np.zeros((time_len, width), dtype=np.float32)
-    mask = np.zeros((time_len, width), dtype=np.int64)  # Class labels
+    mask = np.zeros((time_len, width), dtype=np.float32)  # Binary mask
     weights = np.zeros((time_len, width), dtype=np.float32)
-    
-    # For majority voting: accumulate class votes
-    from collections import defaultdict
-    class_votes = defaultdict(lambda: np.zeros((time_len, width), dtype=np.float32))
     
     # Create window function for blending
     window = np.ones(chunk_size)
@@ -862,36 +864,27 @@ def denoise_and_segment_chunked(
             chunk_tensor = torch.from_numpy(chunk).unsqueeze(0).unsqueeze(0).float().to(device)
             pred_noise_chunk, pred_mask_logits_chunk = model(chunk_tensor)
             denoised_chunk = torch.clamp(chunk_tensor - pred_noise_chunk, 0.0, 1.0).squeeze().cpu().numpy()
-            # Convert logits to class probabilities for voting
-            pred_probs_chunk = torch.softmax(pred_mask_logits_chunk, dim=1).squeeze().cpu().numpy()  # [n_classes, H, W]
+            # Convert logits to binary probabilities using sigmoid
+            pred_mask_chunk = torch.sigmoid(pred_mask_logits_chunk).squeeze().cpu().numpy().astype(np.float32)
             
             # Extract actual size (remove padding)
             actual_len = end - start
             denoised_chunk = denoised_chunk[:actual_len]
-            pred_probs_chunk = pred_probs_chunk[:, :actual_len, :]  # [n_classes, actual_len, width]
+            pred_mask_chunk = pred_mask_chunk[:actual_len]
             window_chunk = window[:actual_len]
             
-            # Blend denoised with window
+            # Blend denoised and mask with window
             weight_chunk = window_chunk[:, np.newaxis]
             denoised[start:end] += denoised_chunk * weight_chunk
+            mask[start:end] += pred_mask_chunk * weight_chunk
             weights[start:end] += weight_chunk
-            
-            # Accumulate class probabilities for voting
-            for c in range(pred_probs_chunk.shape[0]):
-                class_votes[c][start:end] += pred_probs_chunk[c] * weight_chunk
             
             # Move to next chunk
             start += chunk_size - overlap
     
-    # Normalize denoised by weights
+    # Normalize denoised and mask by weights
     denoised = np.divide(denoised, weights, out=np.zeros_like(denoised), where=weights > 0)
-    
-    # Majority voting: assign class with highest accumulated probability
-    for t in range(time_len):
-        for w in range(width):
-            if weights[t, w] > 0:
-                class_scores = [class_votes[c][t, w] / weights[t, w] for c in range(len(class_votes))]
-                mask[t, w] = np.argmax(class_scores)
+    mask = np.divide(mask, weights, out=np.zeros_like(mask), where=weights > 0)
     
     return denoised, mask
 
@@ -918,7 +911,7 @@ if __name__ == "__main__":
         denoise_loss_weight=1.0,
         segment_loss_weight=1.0,
         denoise_loss="l2",
-        segment_loss="ce",  # CrossEntropy for multi-class segmentation
+        segment_loss="bce",  # BinaryCrossEntropy for binary segmentation
         use_gradient_clipping=True,
         max_grad_norm=1.0,
         use_lr_scheduler=True,
