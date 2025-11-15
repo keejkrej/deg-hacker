@@ -299,6 +299,7 @@ class MultiTaskConfig:
     checkpoint_dir: Optional[str] = None  # Directory to save checkpoints (None = don't save)
     save_best: bool = True  # Save best model based on total loss
     checkpoint_every: int = 1  # Save checkpoint every N epochs (1 = every epoch)
+    segment_class_weights: Optional[Tuple[float, ...]] = None  # Class weights for segmentation (None = auto)
 
 
 def dice_loss_multiclass(pred: torch.Tensor, target: torch.Tensor, n_classes: int, smooth: float = 1e-6) -> torch.Tensor:
@@ -353,7 +354,18 @@ def train_multitask_model(
         raise ValueError(f"Unknown denoise loss: {config.denoise_loss}")
     
     if config.segment_loss == "ce":
-        segment_criterion = nn.CrossEntropyLoss()
+        # Use weighted CrossEntropyLoss to handle class imbalance
+        # Background (class 0) is much more common, so we need to weight foreground classes higher
+        if config.segment_class_weights is not None:
+            class_weights = torch.tensor(config.segment_class_weights, device=config.device, dtype=torch.float32)
+        else:
+            # Auto-compute: down-weight background, up-weight tracks
+            # Background typically ~60-80% of pixels, tracks ~5-15% each
+            class_weights = torch.ones(model.n_classes, device=config.device, dtype=torch.float32)
+            class_weights[0] = 0.1  # Down-weight background (most common)
+            class_weights[1:] = 3.0  # Up-weight track classes (rare but important)
+        print(f"  Segmentation class weights: {class_weights.cpu().numpy()}")
+        segment_criterion = nn.CrossEntropyLoss(weight=class_weights)
     elif config.segment_loss == "dice":
         segment_criterion = lambda pred, target: dice_loss_multiclass(pred, target, model.n_classes)
     else:
