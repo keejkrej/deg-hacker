@@ -521,10 +521,14 @@ def process_multi_particle_file(
         contrast_improvement = contrast_denoised / max(contrast_input, 1e-6)
         noise_reduction = noise_denoised / max(noise_input, 1e-6)
         
-        # Check if we should continue
-        should_rerun = (contrast_improvement > 1.2 and 
-                        noise_reduction > 0.6 and 
-                        noise_denoised > 0.03)
+        # Recompute denormalized noise
+        denoised_vis = denoised_norm * (kymograph_max - kymograph_min) + kymograph_min + background_level
+        noise_denoised_abs, _ = estimate_noise_and_contrast(denoised_vis)
+        
+        # Check if we should continue (same criteria)
+        should_rerun = (contrast_improvement < 1.3 or 
+                        noise_denoised_abs > 0.5 or
+                        (contrast_improvement > 1.1 and noise_denoised > 0.02))
         iteration += 1
     
     if iteration > 1:

@@ -254,14 +254,20 @@ def summarize_analysis(
         f"n={simulation.n:.2f} | D true/{method_label} = "
         f"{estimated_diffusion_true:.3f}/{estimated_diffusion_processed:.3f} µm²/ms"
     )
+    # Use percentile-based ranges to be robust to outliers
+    vmin_noisy = np.percentile(simulation.kymograph_noisy, 1)
+    vmax_noisy = np.percentile(simulation.kymograph_noisy, 99)
+    vmin_processed = np.percentile(processed_kymograph, 1)
+    vmax_processed = np.percentile(processed_kymograph, 99)
+    
     # Top row: Noisy kymograph and true path
     ax[0, 0].imshow(
         simulation.kymograph_noisy.T,
         aspect="auto",
         origin="lower",
         extent=[0, simulation.n_t, 0, simulation.n_x],
-        vmin=0,
-        vmax=0.5,
+        vmin=vmin_noisy,
+        vmax=vmax_noisy,
         cmap="gray",
     )
     ax[0, 0].set_title("Noisy Kymograph")
@@ -281,8 +287,8 @@ def summarize_analysis(
         aspect="auto",
         origin="lower",
         extent=[0, simulation.n_t, 0, simulation.n_x],
-        vmin=0,
-        vmax=0.5,
+        vmin=vmin_processed,
+        vmax=vmax_processed,
         cmap="gray",
     )
     ax[1, 0].set_title(f"{method_label} Kymograph")
