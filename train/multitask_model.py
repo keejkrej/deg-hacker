@@ -302,8 +302,9 @@ class MultiTaskConfig:
     save_best: bool = True  # Save best model based on total loss
     checkpoint_every: int = 1  # Save checkpoint every N epochs (1 = every epoch)
     segment_class_weights: Optional[Tuple[float, ...]] = None  # Class weights for segmentation (None = auto)
-    resume_from: Optional[str] = None  # Path to checkpoint to resume training from
+    resume_from: Optional[str] = None  # Path to checkpoint to resume training from (None = auto-detect latest)
     resume_epoch: Optional[int] = None  # Epoch number to resume from (if None, inferred from checkpoint)
+    auto_resume: bool = True  # Automatically resume from latest checkpoint if available
 
 
 def compute_instance_iou(mask_pred: np.ndarray, mask_gt: np.ndarray) -> float:
@@ -509,12 +510,20 @@ def train_multitask_model(
     # Create model
     model = MultiTaskUNet(base_channels=48, use_bn=True, max_tracks=dataset.max_trajectories).to(config.device)
     
-    # Resume from checkpoint if specified
+    # Resume from checkpoint if specified or auto-detect
     start_epoch = 0
     best_loss = float('inf')
-    if config.resume_from and os.path.exists(config.resume_from):
-        print(f"\n📂 Resuming training from checkpoint: {config.resume_from}")
-        checkpoint = torch.load(config.resume_from, map_location=config.device)
+    checkpoint_path = config.resume_from
+    
+    # Auto-detect latest checkpoint if enabled and no explicit path given
+    if checkpoint_path is None and config.auto_resume and config.checkpoint_dir:
+        checkpoint_path = _find_latest_checkpoint(config.checkpoint_dir)
+        if checkpoint_path:
+            print(f"\n🔍 Auto-detected latest checkpoint: {checkpoint_path}")
+    
+    if checkpoint_path and os.path.exists(checkpoint_path):
+        print(f"\n📂 Resuming training from checkpoint: {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location=config.device)
         
         # Load model state
         model.load_state_dict(checkpoint['model_state_dict'])
@@ -527,8 +536,8 @@ def train_multitask_model(
         
         print(f"  Resuming from epoch {start_epoch + 1}")
         print(f"  Best loss so far: {best_loss:.6f}")
-    elif config.resume_from:
-        print(f"⚠ Warning: Resume checkpoint not found: {config.resume_from}")
+    elif checkpoint_path:
+        print(f"⚠ Warning: Resume checkpoint not found: {checkpoint_path}")
         print("  Starting training from scratch")
     
     # Loss functions
