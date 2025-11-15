@@ -180,11 +180,13 @@ def process_single_particle_file(
     
     if should_rerun:
         reason = []
-        if contrast_improvement < 1.3:
+        if contrast_improvement < 1.35:
             reason.append(f"contrast improvement low ({contrast_improvement:.2f}x)")
-        if noise_denoised_abs > 0.5:
-            reason.append(f"denormalized noise high ({noise_denoised_abs:.4f})")
-        if contrast_improvement > 1.1 and noise_denoised > 0.02:
+        if noise_denoised_abs > 0.3 * noise_input_abs:
+            reason.append(f"denormalized noise high relative to input ({noise_denoised_abs:.4f} > {0.3 * noise_input_abs:.4f})")
+        if noise_input_abs > 0.8:
+            reason.append(f"original input noise very high ({noise_input_abs:.4f})")
+        if contrast_improvement > 1.1 and noise_denoised > 0.015:
             reason.append(f"contrast OK but normalized noise high ({noise_denoised:.4f})")
         print(f"  ✓ Criteria met for iterative denoising: {', '.join(reason)}")
     
@@ -223,6 +225,11 @@ def process_single_particle_file(
     
     if iteration > 1:
         print(f"  Completed {iteration} denoising iterations")
+    
+    # Apply median filter to remove remaining non-Gaussian noise
+    from scipy.signal import medfilt
+    print(f"  Applying median filter to remove remaining noise...")
+    denoised = medfilt(denoised, kernel_size=(5, 3))
     
     # Diagnostic: check denoised output
     print(f"  Denoised stats: min={denoised.min():.4f}, max={denoised.max():.4f}, mean={denoised.mean():.4f}, std={denoised.std():.4f}")
@@ -504,11 +511,13 @@ def process_multi_particle_file(
     
     if should_rerun:
         reason = []
-        if contrast_improvement < 1.3:
+        if contrast_improvement < 1.35:
             reason.append(f"contrast improvement low ({contrast_improvement:.2f}x)")
-        if noise_denoised_abs > 0.5:
-            reason.append(f"denormalized noise high ({noise_denoised_abs:.4f})")
-        if contrast_improvement > 1.1 and noise_denoised > 0.02:
+        if noise_denoised_abs > 0.3 * noise_input_abs:
+            reason.append(f"denormalized noise high relative to input ({noise_denoised_abs:.4f} > {0.3 * noise_input_abs:.4f})")
+        if noise_input_abs > 0.8:
+            reason.append(f"original input noise very high ({noise_input_abs:.4f})")
+        if contrast_improvement > 1.1 and noise_denoised > 0.015:
             reason.append(f"contrast OK but normalized noise high ({noise_denoised:.4f})")
         print(f"  ✓ Criteria met for iterative denoising: {', '.join(reason)}")
     
@@ -547,6 +556,11 @@ def process_multi_particle_file(
     
     if iteration > 1:
         print(f"  Completed {iteration} denoising iterations")
+    
+    # Apply median filter to remove remaining non-Gaussian noise
+    from scipy.signal import medfilt
+    print(f"  Applying median filter to remove remaining noise...")
+    denoised_norm = medfilt(denoised_norm, kernel_size=(5, 3))
     
     print(f"  Noise: {noise_input:.4f} -> {noise_denoised:.4f} ({noise_reduction:.2f}x reduction)")
     print(f"  Contrast: {contrast_input:.4f} -> {contrast_denoised:.4f} ({contrast_improvement:.2f}x improvement)")
