@@ -561,14 +561,9 @@ def process_multi_particle_file(
             )
             
             # Apply segmentation mask to suppress background noise
-            from scipy.ndimage import binary_dilation, gaussian_filter
-            mask_threshold = 0.5
-            mask_binary = (segmentation_mask_retry > mask_threshold).astype(np.float32)
-            dilation_kernel = np.ones((3, 3), dtype=bool)
-            mask_dilated = binary_dilation(mask_binary, structure=dilation_kernel).astype(np.float32)
-            mask_soft = gaussian_filter(mask_dilated, sigma=1.0)
-            mask_weight = 0.3
-            denoised_norm = denoised_norm * (mask_soft + (1 - mask_soft) * mask_weight)
+            denoised_norm = apply_segmentation_mask(
+                denoised_norm, segmentation_mask_retry, dilation_size=(3, 3), background_weight=0.3
+            )
             denoised = denoised_norm * (kymograph_max - kymograph_min) + kymograph_min + background_level
             
             # Retry tracking with lower threshold
