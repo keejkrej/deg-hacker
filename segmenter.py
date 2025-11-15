@@ -249,6 +249,7 @@ class SegmentationConfig:
     use_gradient_clipping: bool = True
     max_grad_norm: float = 1.0
     use_lr_scheduler: bool = True
+    use_transfer_learning: bool = True  # Initialize with denoiser weights
     device: str = _default_device()
     denoiser_model_path: str = "models/tiny_unet_denoiser.pth"
 
@@ -267,8 +268,16 @@ def dice_loss(pred: torch.Tensor, target: torch.Tensor, smooth: float = 1e-6) ->
 def train_segmenter(
     config: SegmentationConfig,
     dataset: SegmentationDataset,
+    use_transfer_learning: bool = True,
 ) -> SegmentationUNet:
-    """Train the segmentation model."""
+    """Train the segmentation model.
+    
+    Parameters:
+    -----------
+    use_transfer_learning : bool
+        If True, initialize segmentation model with denoiser weights (except output layer).
+        This leverages learned features from denoising task.
+    """
     
     # Load denoiser model
     print(f"Loading denoiser model from {config.denoiser_model_path}...")
@@ -279,8 +288,39 @@ def train_segmenter(
     dataset.denoiser_model = denoiser_model
     dataset.denoiser_device = config.device
     
-    # Create model
+    # Create segmentation model
+    # Use same base_channels as denoiser for transfer learning compatibility
+    # Note: denoiser uses base_channels=56, but we'll use 48 for segmentation (can still transfer)
     model = SegmentationUNet(base_channels=48, use_bn=True).to(config.device)
+    
+    # Transfer learning: copy weights from denoiser (except output layer)
+    if use_transfer_learning:
+        print("Applying transfer learning: initializing with denoiser weights...")
+        denoiser_state = denoiser_model.state_dict()
+        segmenter_state = model.state_dict()
+        
+        # Copy matching layers (encoder, decoder, bottleneck)
+        # Note: base_channels differ (56 vs 48), so we can only copy layers with matching shapes
+        copied_layers = 0
+        skipped_layers = []
+        for name, param in denoiser_state.items():
+            # Skip output layer (out_conv) - it's different (noise prediction vs probability)
+            if name == "out_conv.weight" or name == "out_conv.bias":
+                continue
+            
+            # Copy if layer exists in segmentation model and shapes match
+            if name in segmenter_state:
+                if segmenter_state[name].shape == param.shape:
+                    segmenter_state[name] = param.clone()
+                    copied_layers += 1
+                else:
+                    skipped_layers.append(f"{name}: {segmenter_state[name].shape} vs {param.shape}")
+        
+        model.load_state_dict(segmenter_state)
+        print(f"  Copied {copied_layers} layers from denoiser")
+        if skipped_layers:
+            print(f"  Skipped {len(skipped_layers)} layers due to shape mismatch (base_channels differ)")
+        print("  Output layer (out_conv) randomly initialized for segmentation task")
     
     # Loss function
     if config.loss == "bce":
@@ -310,6 +350,7 @@ def train_segmenter(
     print(f"  Batch size: {config.batch_size}")
     print(f"  Learning rate: {config.learning_rate}")
     print(f"  Loss: {config.loss}")
+    print(f"  Transfer learning: {use_transfer_learning}")
     print(f"  Dataset size: {len(dataset)}")
     
     model.train()
@@ -415,7 +456,7 @@ if __name__ == "__main__":
     )
     
     # Train
-    model = train_segmenter(config, dataset)
+    model = train_segmenter(config, dataset, use_transfer_learning=config.use_transfer_learning)
     
     # Save
     os.makedirs("models", exist_ok=True)
