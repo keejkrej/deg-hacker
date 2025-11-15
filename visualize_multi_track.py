@@ -14,7 +14,7 @@ from helpers import generate_kymograph, get_diffusion_coefficient
 
 
 def visualize_multi_track_denoising_results(
-    model_path: str = "tiny_unet_denoiser.pth",
+    model_path: str = "models/tiny_unet_denoiser.pth",
     n_samples: int = 3,
     length: int = 512,
     width: int = 512,

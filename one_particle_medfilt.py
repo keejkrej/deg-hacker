@@ -1,3 +1,9 @@
+"""
+Single-Particle Median Filter Analysis
+
+Baseline method using median filtering for comparison with U-Net denoising.
+"""
+
 from scipy.signal import medfilt
 
 from utils import (

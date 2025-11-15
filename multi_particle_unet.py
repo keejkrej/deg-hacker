@@ -1,3 +1,13 @@
+"""
+Multi-Particle Tracking and Analysis Pipeline
+
+This module provides:
+- Multi-particle tracking using Otsu binarization and clustering
+- Crossing event detection and exclusion
+- Comprehensive analysis with diffusion, contrast, and noise estimation
+- Parameter grid evaluation for systematic testing
+"""
+
 import os
 from dataclasses import dataclass
 
@@ -11,7 +21,12 @@ from skimage.filters import threshold_otsu
 from denoiser import load_model, denoise_kymograph, _default_device
 from helpers import estimate_diffusion_msd_fit, get_particle_radius, find_max_subpixel
 from one_particle_unet import denoise_kymograph_chunked
-from utils import simulate_multi_particle, AnalysisMetrics, write_joint_metrics_csv
+from utils import (
+    simulate_multi_particle, 
+    AnalysisMetrics, 
+    write_joint_metrics_csv,
+    estimate_noise_and_contrast,
+)
 
 
 @dataclass
@@ -340,6 +355,70 @@ def _enforce_separation(positions, min_separation, width):
     return positions
 
 
+def _detect_crossing_events(tracks, crossing_threshold=5.0, padding_frames=2):
+    """
+    Detect when tracks cross (get too close) and mark both tracks as NaN from crossing onwards.
+    Once tracks cross, their identity becomes ambiguous, so all subsequent data is excluded.
+    
+    Parameters:
+    -----------
+    tracks : np.ndarray
+        Track positions, shape (n_particles, time_len)
+    crossing_threshold : float
+        Distance threshold below which tracks are considered crossing (default: 5.0 pixels)
+    padding_frames : int
+        Number of frames before crossing to also mark as NaN (default: 2)
+    
+    Returns:
+    --------
+    tracks_cleaned : np.ndarray
+        Tracks with crossing events and all subsequent frames marked as NaN
+    """
+    tracks_cleaned = tracks.copy()
+    n_particles, time_len = tracks.shape
+    
+    # Track which track pairs have crossed (to avoid redundant marking)
+    crossed_pairs = set()
+    
+    # Find all crossing events
+    for t in range(time_len):
+        # Get valid (non-NaN) positions at this time
+        valid_positions = []
+        valid_indices = []
+        for i in range(n_particles):
+            if not np.isnan(tracks[i, t]):
+                valid_positions.append(tracks[i, t])
+                valid_indices.append(i)
+        
+        # Check all pairs for crossings
+        for i_idx, i in enumerate(valid_indices):
+            for j_idx, j in enumerate(valid_indices):
+                if i >= j:  # Only check each pair once
+                    continue
+                
+                # Skip if this pair already crossed earlier
+                pair_key = (min(i, j), max(i, j))
+                if pair_key in crossed_pairs:
+                    continue
+                
+                pos_i = valid_positions[i_idx]
+                pos_j = valid_positions[j_idx]
+                distance = abs(pos_i - pos_j)
+                
+                if distance < crossing_threshold:
+                    # Mark this pair as having crossed
+                    crossed_pairs.add(pair_key)
+                    
+                    # Mark both tracks from padding frames before crossing to end
+                    start_frame = max(0, t - padding_frames)
+                    end_frame = time_len  # Mark everything after crossing
+                    
+                    tracks_cleaned[i, start_frame:end_frame] = np.nan
+                    tracks_cleaned[j, start_frame:end_frame] = np.nan
+    
+    return tracks_cleaned
+
+
 def track_particles(
     kymograph,
     n_particles,
@@ -348,10 +427,22 @@ def track_particles(
     smoothing=0.3,
     min_intensity=0.01,
     intensity_weight=0.2,
+    detect_crossings=True,
+    crossing_threshold=5.0,
+    crossing_padding=2,
 ):
     """
     Track multiple particles through a kymograph.
     Simple, robust approach: find peaks, assign to nearest predicted positions.
+    
+    Parameters:
+    -----------
+    detect_crossings : bool
+        If True, detect crossing events and mark both tracks as NaN during crossings (default: True)
+    crossing_threshold : float
+        Distance threshold for detecting crossings (default: 5.0 pixels)
+    crossing_padding : int
+        Number of frames before/after crossing to also exclude (default: 2)
     """
     time_len, width = kymograph.shape
     tracks = np.full((n_particles, time_len), np.nan)
@@ -539,6 +630,10 @@ def track_particles(
         prev_prev_positions = prev_positions
         prev_positions = tracks[:, t].copy()
 
+    # Detect and mark crossing events
+    if detect_crossings and n_particles > 1:
+        tracks = _detect_crossing_events(tracks, crossing_threshold, crossing_padding)
+
     return tracks
 
 
@@ -548,6 +643,7 @@ def summarize_multi_particle_analysis(
     estimated_tracks,
     method_label="U-Net Denoised",
     figure_subdir="multi_unet",
+    noisy_kymograph=None,
 ):
     """
     Compute metrics and create diagnostic plot for multi-particle analysis.
@@ -644,6 +740,12 @@ def summarize_multi_particle_analysis(
     fig.savefig(fig_filename, dpi=150, bbox_inches="tight")
     plt.close(fig)
     
+    # Estimate noise and contrast from noisy kymograph (if provided)
+    noise_estimate_global = None
+    contrast_estimate_global = None
+    if noisy_kymograph is not None:
+        noise_estimate_global, contrast_estimate_global = estimate_noise_and_contrast(noisy_kymograph)
+    
     # Compute metrics for each track
     for idx in range(n_particles):
         true_path = simulation.true_paths[idx]
@@ -661,6 +763,27 @@ def summarize_multi_particle_analysis(
         true_radius = simulation.radii_nm[idx]
         estimated_radius = get_particle_radius(estimated_diffusion)
         
+        # Estimate contrast for this specific track from denoised kymograph
+        # Extract intensity along the track
+        contrast_estimate_track = None
+        if len(estimated_path) > 0:
+            valid_mask = ~np.isnan(estimated_path)
+            if np.sum(valid_mask) > 10:  # Need enough valid points
+                track_intensities = []
+                for t in range(len(estimated_path)):
+                    if valid_mask[t]:
+                        pos = int(np.clip(estimated_path[t], 0, denoised_kymograph.shape[1] - 1))
+                        track_intensities.append(denoised_kymograph[t, pos])
+                
+                if len(track_intensities) > 0:
+                    # Contrast = peak intensity - background
+                    peak_intensity = np.percentile(track_intensities, 90)
+                    background = np.median(track_intensities)
+                    contrast_estimate_track = max(peak_intensity - background, 0.0)
+        
+        # Use track-specific contrast if available, otherwise global
+        contrast_estimate = contrast_estimate_track if contrast_estimate_track is not None else contrast_estimate_global
+        
         metrics = AnalysisMetrics(
             method_label=method_label,
             particle_radius_nm=true_radius,
@@ -672,17 +795,35 @@ def summarize_multi_particle_analysis(
             radius_true=true_radius,
             radius_noisy=None,
             radius_processed=estimated_radius,
-            noise_estimate=None,
-            contrast_estimate=None,
+            noise_estimate=noise_estimate_global,
+            contrast_estimate=contrast_estimate,
             figure_path=fig_filename,
         )
         metrics_list.append(metrics)
         
-        print(
-            f"[{method_label}] Track {idx+1}: "
-            f"r_true={true_radius:.2f} nm, r_est={estimated_radius:.2f} nm | "
-            f"D_true={true_diffusion:.3f}, D_est={estimated_diffusion:.3f} µm²/ms"
-        )
+        # Count valid (non-NaN) frames
+        valid_frames = np.sum(~np.isnan(estimated_path))
+        total_frames = len(estimated_path)
+        excluded_frames = total_frames - valid_frames
+        
+        # Build output string
+        output_parts = [
+            f"[{method_label}] Track {idx+1}:",
+            f"r_true={true_radius:.2f} nm, r_est={estimated_radius:.2f} nm",
+            f"D_true={true_diffusion:.3f}, D_est={estimated_diffusion:.3f} µm²/ms",
+        ]
+        
+        if contrast_estimate is not None:
+            output_parts.append(f"c_true={simulation.contrasts[idx]:.2f}, c_est={contrast_estimate:.2f}")
+        
+        if noise_estimate_global is not None:
+            output_parts.append(f"n_true={simulation.noise_level:.2f}, n_est={noise_estimate_global:.2f}")
+        
+        output_parts.append(f"Valid frames: {valid_frames}/{total_frames}")
+        if excluded_frames > 0:
+            output_parts.append(f"(excluded {excluded_frames} due to crossings)")
+        
+        print(" | ".join(output_parts))
     
     print(f"[{method_label}] Figure saved to {fig_filename}")
     return metrics_list
@@ -694,7 +835,7 @@ def analyze_multi_particle(
     noise_level,
     chunk_length=512,
     overlap=64,
-    model_path="tiny_unet_denoiser.pth",
+    model_path="models/tiny_unet_denoiser.pth",
     max_candidates=30,
     max_jump=8,
 ):
@@ -722,6 +863,9 @@ def analyze_multi_particle(
         n_particles=len(radii_nm),
         max_candidates=max_candidates,
         max_jump=max_jump,
+        detect_crossings=True,  # Enable crossing detection
+        crossing_threshold=5.0,  # Mark crossings when tracks < 5 pixels apart
+        crossing_padding=2,  # Exclude 2 frames before/after crossing
     )
 
     # Generate comprehensive report (like one_particle_unet.py)
@@ -731,6 +875,7 @@ def analyze_multi_particle(
         estimated_tracks,
         method_label="U-Net Denoised",
         figure_subdir="multi_unet",
+        noisy_kymograph=simulation.kymograph_noisy,  # Pass noisy kymograph for noise/contrast estimation
     )
 
     return metrics_list

@@ -752,8 +752,10 @@ if __name__ == "__main__":
         use_lr_scheduler=True,  # Enable LR scheduler for better convergence
     )
     model = train_denoiser(config, dataset)
-    save_model(model, "tiny_unet_denoiser.pth")
-    print(f"\nModel saved to: tiny_unet_denoiser.pth")
+    os.makedirs("models", exist_ok=True)
+    model_path = "models/tiny_unet_denoiser.pth"
+    save_model(model, model_path)
+    print(f"\nModel saved to: {model_path}")
     
     # Visualize denoising results
     print("\n" + "=" * 60)

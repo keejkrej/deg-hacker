@@ -1,164 +1,266 @@
-from denoiser import load_model, denoise_kymograph, _default_device
-import os
+"""
+Single-Particle U-Net Analysis Pipeline
+
+This module provides:
+- Single-particle denoising and tracking
+- Chunked processing for large kymographs
+- Parameter grid evaluation
+- Comprehensive metrics and visualization
+"""
+
+from pathlib import Path
+
 import numpy as np
 
-from utils import simulate_single_particle, summarize_analysis, write_joint_metrics_csv
+from denoiser import load_model, _default_device
+from helpers import estimate_diffusion_msd_fit, get_particle_radius, find_max_subpixel
+from utils import (
+    simulate_single_particle,
+    summarize_analysis,
+    write_joint_metrics_csv,
+)
 
-
-DEFAULT_PARTICLE_RADII = [2.5, 5.0, 10.0]
-DEFAULT_CONTRASTS = [0.6, 0.8, 1.0]
-DEFAULT_NOISE_LEVELS = [0.1, 0.3, 0.5]
+# Default model path
+MODEL_PATH = "models/tiny_unet_denoiser.pth"
 
 
 def denoise_kymograph_chunked(
     model, kymograph, device=None, chunk_size=512, overlap=64
 ):
     """
-    Denoise a kymograph by processing it in chunks along both dimensions if needed.
-    Handles kymographs of any size, including smaller than chunk_size (e.g., 256x256).
-
+    Denoise a kymograph by processing it in chunks.
+    
+    Handles kymographs larger than chunk_size by splitting along time dimension
+    and reassembling with overlap handling.
+    
     Parameters:
     -----------
     model : TinyUNet
-        Trained U-Net model
+        Trained denoising model
     kymograph : np.ndarray
-        Input kymograph of shape (time, position)
+        Noisy kymograph, shape (time, position)
     device : str, optional
-        Device to run model on
+        Device to use ('cuda' or 'cpu')
     chunk_size : int
-        Size of each chunk in both dimensions (default: 512, matches training)
+        Size of chunks for processing (default: 512)
     overlap : int
-        Overlap between chunks to avoid boundary artifacts (default: 64)
-
+        Overlap between chunks in pixels (default: 64)
+    
     Returns:
     --------
-    np.ndarray
-        Denoised kymograph of same shape as input
+    denoised : np.ndarray
+        Denoised kymograph, same shape as input
     """
-    device = device or _default_device()
-    model = model.to(device)
+    if device is None:
+        device = _default_device()
+    
     model.eval()
-
-    time_len, pos_len = kymograph.shape
-
-    # If kymograph fits in one chunk (both dimensions <= chunk_size), process directly
-    # For smaller inputs (e.g., 256x256), pad to chunk_size, process, then crop back
-    if time_len <= chunk_size and pos_len <= chunk_size:
-        if time_len < chunk_size or pos_len < chunk_size:
-            # Pad smaller inputs to chunk_size for optimal processing
-            padded = np.zeros((chunk_size, chunk_size), dtype=kymograph.dtype)
-            padded[:time_len, :pos_len] = kymograph
-            denoised_padded = denoise_kymograph(model, padded, device=device)
-            return denoised_padded[:time_len, :pos_len]
+    time_len, width = kymograph.shape
+    
+    # If kymograph fits in one chunk, process directly
+    if time_len <= chunk_size:
+        # Handle padding if needed
+        if width < chunk_size:
+            # Pad width
+            padded = np.pad(
+                kymograph,
+                ((0, 0), (0, chunk_size - width)),
+                mode="constant",
+                constant_values=0,
+            )
+            denoised_padded = model(
+                torch.from_numpy(padded[None, None, :, :])
+                .float()
+                .to(device)
+            ).cpu().numpy()[0, 0]
+            return denoised_padded[:, :width]
         else:
-            # Exact size, process directly
-            return denoise_kymograph(model, kymograph, device=device)
-
-    # Need chunking - determine which dimensions need chunking
-    chunk_time = time_len > chunk_size
-    chunk_pos = pos_len > chunk_size
-
-    if not chunk_time and not chunk_pos:
-        # Shouldn't reach here, but handle just in case
-        return denoise_kymograph(model, kymograph, device=device)
-
-    # Process in overlapping chunks
-    stride = chunk_size - overlap
-    denoised_chunks = []
-
-    # Generate chunk coordinates
-    time_starts = list(range(0, time_len, stride))
-    pos_starts = list(range(0, pos_len, stride)) if chunk_pos else [0]
-
-    for t_start in time_starts:
-        for p_start in pos_starts:
-            t_end = min(t_start + chunk_size, time_len)
-            p_end = min(p_start + chunk_size, pos_len)
-            
-            chunk = kymograph[t_start:t_end, p_start:p_end]
-            
-            # Pad chunk to chunk_size x chunk_size if needed
-            padded_chunk = np.zeros((chunk_size, chunk_size), dtype=chunk.dtype)
-            chunk_t_len, chunk_p_len = chunk.shape
-            padded_chunk[:chunk_t_len, :chunk_p_len] = chunk
-            
-            # Denoise the padded chunk
-            chunk_denoised_padded = denoise_kymograph(model, padded_chunk, device=device)
-            
-            # Crop back to original chunk size
-            chunk_denoised = chunk_denoised_padded[:chunk_t_len, :chunk_p_len]
-            
-            denoised_chunks.append((t_start, t_end, p_start, p_end, chunk_denoised))
-
-    # Combine chunks with overlap handling (averaging in overlap regions)
+            # Process directly
+            denoised = model(
+                torch.from_numpy(kymograph[None, None, :, :]).float().to(device)
+            ).cpu().numpy()[0, 0]
+            return denoised
+    
+    # Process in chunks
     denoised = np.zeros_like(kymograph)
-    counts = np.zeros_like(kymograph, dtype=np.float32)
-
-    for t_start, t_end, p_start, p_end, chunk_denoised in denoised_chunks:
-        denoised[t_start:t_end, p_start:p_end] += chunk_denoised
-        counts[t_start:t_end, p_start:p_end] += 1.0
-
-    # Average in overlap regions (avoid division by zero)
-    denoised = denoised / np.maximum(counts, 1.0)
-
+    
+    # Determine if we need 2D chunking (both time and position)
+    needs_2d_chunking = width > chunk_size
+    
+    if needs_2d_chunking:
+        # 2D chunking: split both time and position
+        for t_start in range(0, time_len, chunk_size - overlap):
+            t_end = min(t_start + chunk_size, time_len)
+            for x_start in range(0, width, chunk_size - overlap):
+                x_end = min(x_start + chunk_size, width)
+                
+                chunk = kymograph[t_start:t_end, x_start:x_end]
+                
+                # Pad if necessary
+                pad_t = chunk_size - (t_end - t_start)
+                pad_x = chunk_size - (x_end - x_start)
+                
+                if pad_t > 0 or pad_x > 0:
+                    chunk = np.pad(
+                        chunk,
+                        ((0, pad_t), (0, pad_x)),
+                        mode="constant",
+                        constant_values=0,
+                    )
+                
+                # Denoise chunk
+                with torch.no_grad():
+                    chunk_tensor = (
+                        torch.from_numpy(chunk[None, None, :, :]).float().to(device)
+                    )
+                    denoised_chunk = model(chunk_tensor).cpu().numpy()[0, 0]
+                
+                # Remove padding
+                denoised_chunk = denoised_chunk[: t_end - t_start, : x_end - x_start]
+                
+                # Handle overlap: use weighted average
+                t_slice = slice(t_start, t_end)
+                x_slice = slice(x_start, x_end)
+                
+                if t_start > 0 or x_start > 0:
+                    # Create weights for blending
+                    weights = np.ones_like(denoised_chunk)
+                    if t_start > 0:
+                        weights[:overlap, :] *= np.linspace(0.5, 1.0, overlap)[:, None]
+                    if x_start > 0:
+                        weights[:, :overlap] *= np.linspace(0.5, 1.0, overlap)[None, :]
+                    
+                    existing = denoised[t_slice, x_slice]
+                    denoised[t_slice, x_slice] = (
+                        weights * denoised_chunk + (1 - weights) * existing
+                    )
+                else:
+                    denoised[t_slice, x_slice] = denoised_chunk
+    else:
+        # 1D chunking: only split along time dimension
+        for t_start in range(0, time_len, chunk_size - overlap):
+            t_end = min(t_start + chunk_size, time_len)
+            chunk = kymograph[t_start:t_end, :]
+            
+            # Pad if necessary
+            if t_end - t_start < chunk_size:
+                chunk = np.pad(
+                    chunk,
+                    ((0, chunk_size - (t_end - t_start)), (0, 0)),
+                    mode="constant",
+                    constant_values=0,
+                )
+            
+            # Denoise chunk
+            with torch.no_grad():
+                chunk_tensor = (
+                    torch.from_numpy(chunk[None, None, :, :]).float().to(device)
+                )
+                denoised_chunk = model(chunk_tensor).cpu().numpy()[0, 0]
+            
+            # Remove padding
+            denoised_chunk = denoised_chunk[: t_end - t_start, :]
+            
+            # Handle overlap: use weighted average
+            if t_start > 0:
+                weights = np.ones((t_end - t_start, width))
+                weights[:overlap, :] = np.linspace(0.5, 1.0, overlap)[:, None]
+                existing = denoised[t_start:t_end, :]
+                denoised[t_start:t_end, :] = (
+                    weights * denoised_chunk + (1 - weights) * existing
+                )
+            else:
+                denoised[t_start:t_end, :] = denoised_chunk
+    
     return denoised
 
 
-def analyze_particle(p, c, n):
+def analyze_particle(p, c, n, model_path=None):
     """
-    Analyze particle diffusion from kymograph data using U-Net denoising.
-
+    Analyze a single particle from kymograph data.
+    
     Parameters:
     -----------
     p : float
-        Particle size in nm
+        Particle radius in nm
     c : float
         Contrast
     n : float
         Noise level
+    model_path : str, optional
+        Path to trained model (default: models/tiny_unet_denoiser.pth)
+    
+    Returns:
+    --------
+    metrics : AnalysisMetrics
+        Analysis results with diffusion, radius, and other metrics
     """
+    if model_path is None:
+        model_path = MODEL_PATH
+    
     simulation = simulate_single_particle(p, c, n)
-
-    # Load trained U-Net model
     device = _default_device()
-    model_path = "tiny_unet_denoiser.pth"
-    if not os.path.exists(model_path):
+    
+    if not Path(model_path).exists():
         raise FileNotFoundError(f"Model file not found: {model_path}")
-
+    
     model = load_model(model_path, device=device)
-
-    # Denoise using chunked processing (handles any size, including 256x256)
-    kymograph_denoised = denoise_kymograph_chunked(
-        model,
-        simulation.kymograph_noisy,
-        device=device,
-        chunk_size=512,
-        overlap=64,
+    
+    denoised = denoise_kymograph_chunked(
+        model, simulation.kymograph_noisy, device=device
     )
-
+    
     return summarize_analysis(
         simulation,
-        kymograph_denoised,
+        denoised,
         method_label="U-Net Denoised",
         figure_subdir="unet",
     )
 
 
 def run_parameter_grid(
-    particle_radii=DEFAULT_PARTICLE_RADII,
-    contrasts=DEFAULT_CONTRASTS,
-    noise_levels=DEFAULT_NOISE_LEVELS,
+    particle_radii=[2.5, 5.0, 10.0],
+    contrasts=[0.6, 0.8, 1.0],
+    noise_levels=[0.1, 0.3, 0.5],
     csv_path="metrics/one_particle_unet.csv",
+    model_path=None,
 ):
+    """
+    Run analysis over a grid of parameters.
+    
+    Parameters:
+    -----------
+    particle_radii : list
+        Particle radii to test (nm)
+    contrasts : list
+        Contrast values to test
+    noise_levels : list
+        Noise levels to test
+    csv_path : str
+        Path to save CSV metrics
+    model_path : str, optional
+        Path to trained model
+    
+    Returns:
+    --------
+    csv_path : str
+        Path to saved CSV file
+    """
+    if model_path is None:
+        model_path = MODEL_PATH
+    
     metrics_rows = []
     for p in particle_radii:
         for c in contrasts:
             for n in noise_levels:
-                print(f"\n[U-Net] Running p={p}, c={c}, n={n}")
-                metrics_rows.append(analyze_particle(p, c, n))
+                print(f"[U-Net] Running p={p:.1f} nm, c={c:.2f}, n={n:.2f}")
+                metrics_rows.append(analyze_particle(p, c, n, model_path=model_path))
+    
     written_csv = write_joint_metrics_csv(metrics_rows, csv_path)
-    print(f"[U-Net] Completed {len(metrics_rows)} runs; aggregated metrics -> {written_csv}")
+    print(f"\n[U-Net] Completed {len(metrics_rows)} analyses; metrics -> {written_csv}")
+    return written_csv
 
 
 if __name__ == "__main__":
+    # Run parameter grid
     run_parameter_grid()

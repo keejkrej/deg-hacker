@@ -131,11 +131,24 @@ cython_debug/
 # macOS
 .DS_Store
 
-# Images
+# Project-specific
+# Model checkpoints (keep structure, ignore weights)
+*.pth
+models/*.pth
+
+# Generated figures (keep structure)
+figures/**/*.png
 *.png
 
-*.zip
-data/
-*.pth
-*.csv
+# Data files
 *.npy
+*.csv
+data/
+Hackathon/
+
+# Archives
+*.zip
+
+# Temporary files
+*_backup.py
+*_temp.py
