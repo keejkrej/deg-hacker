@@ -24,7 +24,7 @@ from scipy.signal import find_peaks
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from train.multitask_model import load_multitask_model, denoise_and_segment_chunked, _default_device
-from inference.multi_particle_unet import track_particles
+from multi_particle_unet import track_particles
 from utils import (
     AnalysisMetrics,
     write_joint_metrics_csv,
