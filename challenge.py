@@ -644,11 +644,15 @@ def process_multi_particle_file(
     vmax_denoised = np.percentile(denoised, 99)
     colors = ['red', 'blue', 'green', 'orange', 'purple', 'cyan']
     
+    # Set same limits as trajectory plot
+    time_len, width = kymograph_noisy.shape
+    
     # Noisy input
     axes[0, 0].imshow(
         kymograph_noisy.T,
         aspect="auto",
         origin="lower",
+        extent=[0, time_len, 0, width],
         vmin=vmin_noisy,
         vmax=vmax_noisy,
         cmap="gray",
@@ -662,6 +666,7 @@ def process_multi_particle_file(
         denoised.T,
         aspect="auto",
         origin="lower",
+        extent=[0, time_len, 0, width],
         vmin=vmin_denoised,
         vmax=vmax_denoised,
         cmap="gray",
@@ -680,8 +685,7 @@ def process_multi_particle_file(
     axes[0, 1].legend(loc='upper right', fontsize=8)
     
     # Trajectories plot
-    # Set same limits as kymograph plots
-    time_len, width = kymograph_noisy.shape
+    # Set same limits as kymograph plots (already defined above)
     for track_id in range(n_particles):
         track = estimated_tracks[track_id]
         valid_mask = ~np.isnan(track)
