@@ -222,12 +222,9 @@ def process_single_particle_file(
                     estimated_path.append(np.nan)
         estimated_path = np.array(estimated_path)
     
-    # Convert path to pixel coordinates for diffusion estimation
-    # estimated_path is in normalized coordinates [0, 1], convert to pixel positions
-    if not np.all(np.isnan(estimated_path)):
-        estimated_path_pixels = estimated_path * (kymograph_noisy.shape[1] - 1)
-    else:
-        estimated_path_pixels = estimated_path.copy()
+    # find_max_subpixel returns pixel coordinates (column indices), not normalized
+    # So estimated_path is already in pixel coordinates [0, width-1]
+    estimated_path_pixels = estimated_path.copy()
     
     # Check if path is valid (has variation and enough points)
     valid_path = ~np.isnan(estimated_path_pixels)
