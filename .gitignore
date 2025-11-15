@@ -136,3 +136,4 @@ cython_debug/
 
 *.zip
 data/
+tiny_unet_denoiser.pth
