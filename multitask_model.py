@@ -23,7 +23,24 @@ import matplotlib.pyplot as plt
 
 from utils import simulate_single_particle, simulate_multi_particle
 from helpers import generate_kymograph, get_diffusion_coefficient
-from denoiser import ConvBlock
+
+
+class ConvBlock(nn.Module):
+    """Convolutional block with two conv layers, batch norm, and ReLU."""
+    def __init__(self, in_ch: int, out_ch: int, use_bn: bool = True) -> None:
+        super().__init__()
+        layers = [
+            nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_ch) if use_bn else nn.Identity(),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_ch) if use_bn else nn.Identity(),
+            nn.ReLU(inplace=True),
+        ]
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
 
 
 def _default_device() -> str:

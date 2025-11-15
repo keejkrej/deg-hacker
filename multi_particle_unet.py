@@ -18,7 +18,7 @@ from scipy.ndimage import label, center_of_mass
 from sklearn.cluster import DBSCAN
 from skimage.filters import threshold_otsu
 
-from denoiser import load_model, denoise_kymograph, _default_device
+from multitask_model import load_multitask_model, _default_device
 from helpers import estimate_diffusion_msd_fit, get_particle_radius, find_max_subpixel
 from multitask_model import denoise_and_segment_chunked
 from utils import (
@@ -854,9 +854,10 @@ def analyze_multi_particle(
     device = _default_device()
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"Model file not found: {model_path}")
-    model = load_model(model_path, device=device)
+    # Load multi-task model
+    model = load_multitask_model(model_path, device=device)
 
-        denoised, _ = denoise_and_segment_chunked(
+    denoised, _ = denoise_and_segment_chunked(
         model,
         simulation.kymograph_noisy,
         device=device,
