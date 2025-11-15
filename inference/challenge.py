@@ -35,8 +35,7 @@ from helpers import estimate_diffusion_msd_fit, get_particle_radius
 
 def apply_segmentation_mask(
     denoised: np.ndarray,
-    segmentation_mask: np.ndarray,
-    mask_threshold: float = 0.5,
+    segmentation_labels: np.ndarray,
     dilation_size: Tuple[int, int] = (3, 3),
     background_weight: float = 0.3,
     gaussian_sigma: float = 1.0,
@@ -48,10 +47,8 @@ def apply_segmentation_mask(
     -----------
     denoised : np.ndarray
         Denoised kymograph
-    segmentation_mask : np.ndarray
-        Probability map from segmentation head, values in [0, 1]
-    mask_threshold : float
-        Threshold for binary mask (default: 0.5)
+    segmentation_labels : np.ndarray
+        Class labels from segmentation head: 0=background, 1=track1, 2=track2, 3=track3
     dilation_size : Tuple[int, int]
         Size of dilation kernel (time, space) to expand mask (default: (3, 3))
     background_weight : float
@@ -66,8 +63,8 @@ def apply_segmentation_mask(
     """
     from scipy.ndimage import binary_dilation, gaussian_filter
     
-    # Threshold mask to binary
-    mask_binary = (segmentation_mask > mask_threshold).astype(np.float32)
+    # Convert class labels to binary mask (non-background = 1)
+    mask_binary = (segmentation_labels > 0).astype(np.float32)
     
     # Dilate mask to make it slightly bigger
     dilation_kernel = np.ones(dilation_size, dtype=bool)
@@ -189,21 +186,22 @@ def process_single_particle_file(
     print(f"  Normalized bg percentile (10th): {np.percentile(kymograph_noisy_norm, 10):.4f}, signal percentile (99th): {np.percentile(kymograph_noisy_norm, 99):.4f}")
     
     # Denoise and segment using multi-task model
-    denoised, segmentation_mask = denoise_and_segment_chunked(
+    denoised, segmentation_labels = denoise_and_segment_chunked(
         model, kymograph_noisy_norm, device=device, chunk_size=512, overlap=64
     )
     
     # Apply segmentation mask to suppress background noise
-    mask_binary = (segmentation_mask > 0.5).astype(np.float32)
+    mask_binary = (segmentation_labels > 0).astype(np.float32)
     mask_dilated = (apply_segmentation_mask(
-        np.ones_like(segmentation_mask), segmentation_mask, dilation_size=(3, 3)
+        np.ones_like(segmentation_labels), segmentation_labels, dilation_size=(3, 3)
     ) > 0.5).astype(np.float32)
     
     denoised = apply_segmentation_mask(
-        denoised, segmentation_mask, dilation_size=(3, 3), background_weight=0.3
+        denoised, segmentation_labels, dilation_size=(3, 3), background_weight=0.3
     )
     
-    print(f"  Segmentation mask: {np.sum(mask_binary > 0):.0f} pixels ({100*np.mean(mask_binary):.1f}% of image)")
+    print(f"  Segmentation labels: {np.sum(mask_binary > 0):.0f} pixels ({100*np.mean(mask_binary):.1f}% of image)")
+    print(f"  Track classes detected: {np.unique(segmentation_labels)}")
     print(f"  After dilation: {np.sum(mask_dilated > 0):.0f} pixels ({100*np.mean(mask_dilated):.1f}% of image)")
     
     # Check background noise level (std of 0-80 percentile regions, outside tracks)
@@ -461,21 +459,22 @@ def process_multi_particle_file(
     print(f"  Normalized bg percentile (10th): {np.percentile(kymograph_noisy_norm, 10):.4f}, signal percentile (99th): {np.percentile(kymograph_noisy_norm, 99):.4f}")
     
     # Denoise and segment using multi-task model
-    denoised_norm, segmentation_mask_norm = denoise_and_segment_chunked(
+    denoised_norm, segmentation_labels_norm = denoise_and_segment_chunked(
         model, kymograph_noisy_norm, device=device, chunk_size=512, overlap=64
     )
     
     # Apply segmentation mask to suppress background noise
-    mask_binary = (segmentation_mask_norm > 0.5).astype(np.float32)
+    mask_binary = (segmentation_labels_norm > 0).astype(np.float32)
     mask_dilated = (apply_segmentation_mask(
-        np.ones_like(segmentation_mask_norm), segmentation_mask_norm, dilation_size=(3, 3)
+        np.ones_like(segmentation_labels_norm), segmentation_labels_norm, dilation_size=(3, 3)
     ) > 0.5).astype(np.float32)
     
     denoised_norm = apply_segmentation_mask(
-        denoised_norm, segmentation_mask_norm, dilation_size=(3, 3), background_weight=0.3
+        denoised_norm, segmentation_labels_norm, dilation_size=(3, 3), background_weight=0.3
     )
     
-    print(f"  Segmentation mask: {np.sum(mask_binary > 0):.0f} pixels ({100*np.mean(mask_binary):.1f}% of image)")
+    print(f"  Segmentation labels: {np.sum(mask_binary > 0):.0f} pixels ({100*np.mean(mask_binary):.1f}% of image)")
+    print(f"  Track classes detected: {np.unique(segmentation_labels_norm)}")
     print(f"  After dilation: {np.sum(mask_dilated > 0):.0f} pixels ({100*np.mean(mask_dilated):.1f}% of image)")
     
     # Check background noise level (std of 0-80 percentile regions, outside tracks)
@@ -559,13 +558,13 @@ def process_multi_particle_file(
             else:
                 denoised_norm_2 = np.clip(denoised_bg_sub, 0.0, 1.0)
             
-            denoised_norm, segmentation_mask_retry = denoise_and_segment_chunked(
+            denoised_norm, segmentation_labels_retry = denoise_and_segment_chunked(
                 model, denoised_norm_2, device=device, chunk_size=512, overlap=64
             )
             
             # Apply segmentation mask to suppress background noise
             denoised_norm = apply_segmentation_mask(
-                denoised_norm, segmentation_mask_retry, dilation_size=(3, 3), background_weight=0.3
+                denoised_norm, segmentation_labels_retry, dilation_size=(3, 3), background_weight=0.3
             )
             denoised = denoised_norm * (kymograph_max - kymograph_min) + kymograph_min + background_level
             
