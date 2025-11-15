@@ -622,13 +622,16 @@ if __name__ == "__main__":
         use_gradient_clipping=True,
         max_grad_norm=1.0,
         use_lr_scheduler=True,
+        checkpoint_dir="models/checkpoints",  # Save checkpoints after each epoch
+        save_best=True,  # Save best model based on loss
+        checkpoint_every=1,  # Save checkpoint every epoch
     )
     
     # Train
     model = train_multitask_model(config, dataset)
     
-    # Save
+    # Save final model
     os.makedirs("models", exist_ok=True)
     model_path = "models/multitask_unet.pth"
     save_multitask_model(model, model_path)
-    print(f"\nMulti-task model saved to: {model_path}")
+    print(f"\nFinal model saved to: {model_path}")
