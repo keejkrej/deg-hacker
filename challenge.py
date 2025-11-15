@@ -137,9 +137,30 @@ def process_single_particle_file(
         estimated_path.append(pos)
     estimated_path = np.array(estimated_path)
     
-    # Estimate diffusion coefficient
-    diffusion_processed = estimate_diffusion_msd_fit(estimated_path)
-    radius_processed = get_particle_radius(diffusion_processed)
+    # Check if path is valid (has variation and enough points)
+    valid_path = ~np.isnan(estimated_path) if np.any(np.isnan(estimated_path)) else np.ones_like(estimated_path, dtype=bool)
+    if np.sum(valid_path) < 10:
+        print(f"  ⚠ Warning: Too few valid points ({np.sum(valid_path)}), using NaN for diffusion")
+        diffusion_processed = np.nan
+        radius_processed = np.nan
+    elif np.std(estimated_path[valid_path]) < 0.1:
+        print(f"  ⚠ Warning: Path has no variation (std={np.std(estimated_path[valid_path]):.4f}), using NaN for diffusion")
+        diffusion_processed = np.nan
+        radius_processed = np.nan
+    else:
+        # Estimate diffusion coefficient with error handling
+        try:
+            diffusion_processed = estimate_diffusion_msd_fit(estimated_path)
+            if np.isnan(diffusion_processed) or diffusion_processed <= 0:
+                print(f"  ⚠ Warning: Invalid diffusion estimate ({diffusion_processed}), using NaN")
+                diffusion_processed = np.nan
+                radius_processed = np.nan
+            else:
+                radius_processed = get_particle_radius(diffusion_processed)
+        except (np.linalg.LinAlgError, ValueError) as e:
+            print(f"  ⚠ Warning: Diffusion estimation failed ({e}), using NaN")
+            diffusion_processed = np.nan
+            radius_processed = np.nan
     
     # Estimate noise and contrast
     noise_estimate, contrast_estimate = estimate_noise_and_contrast(
@@ -296,9 +317,29 @@ def process_multi_particle_file(
             print(f"  ⚠ Track {track_id + 1}: All NaN, skipping")
             continue
         
-        # Estimate diffusion coefficient
-        diffusion_processed = estimate_diffusion_msd_fit(track)
-        radius_processed = get_particle_radius(diffusion_processed)
+        # Estimate diffusion coefficient with error handling
+        valid_mask = ~np.isnan(track)
+        if np.sum(valid_mask) < 10:
+            print(f"    ⚠ Too few valid points ({np.sum(valid_mask)}), skipping diffusion estimation")
+            diffusion_processed = np.nan
+            radius_processed = np.nan
+        elif np.std(track[valid_mask]) < 0.1:
+            print(f"    ⚠ Track has no variation (std={np.std(track[valid_mask]):.4f}), skipping diffusion estimation")
+            diffusion_processed = np.nan
+            radius_processed = np.nan
+        else:
+            try:
+                diffusion_processed = estimate_diffusion_msd_fit(track)
+                if np.isnan(diffusion_processed) or diffusion_processed <= 0:
+                    print(f"    ⚠ Invalid diffusion estimate ({diffusion_processed}), using NaN")
+                    diffusion_processed = np.nan
+                    radius_processed = np.nan
+                else:
+                    radius_processed = get_particle_radius(diffusion_processed)
+            except (np.linalg.LinAlgError, ValueError) as e:
+                print(f"    ⚠ Diffusion estimation failed ({type(e).__name__}), using NaN")
+                diffusion_processed = np.nan
+                radius_processed = np.nan
         
         # Estimate per-track contrast from denoised kymograph
         valid_mask = ~np.isnan(track)
