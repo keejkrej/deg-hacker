@@ -250,7 +250,8 @@ def process_single_particle_file(
     axes[0, 0].set_ylabel("Position")
     
     # Top right: Denoised only (no track overlay)
-    denoised_vis = denoised * (kymograph_max - kymograph_min) + kymograph_min
+    # Denormalize: denorm = norm * (max - min) + min + background
+    denoised_vis = denoised * (kymograph_max - kymograph_min) + kymograph_min + background_level
     im = axes[0, 1].imshow(
         denoised_vis.T,
         aspect="auto",
