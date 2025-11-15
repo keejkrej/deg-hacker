@@ -20,7 +20,10 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 from scipy.signal import find_peaks
 
-from multitask_model import load_multitask_model, denoise_and_segment_chunked, _default_device
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from train.multitask_model import load_multitask_model, denoise_and_segment_chunked, _default_device
 from multi_particle_unet import track_particles
 from utils import (
     AnalysisMetrics,

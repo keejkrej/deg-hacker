@@ -18,9 +18,10 @@ from scipy.ndimage import label, center_of_mass
 from sklearn.cluster import DBSCAN
 from skimage.filters import threshold_otsu
 
-from multitask_model import load_multitask_model, _default_device
-from helpers import estimate_diffusion_msd_fit, get_particle_radius, find_max_subpixel
-from multitask_model import denoise_and_segment_chunked
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from train.multitask_model import load_multitask_model, _default_device, denoise_and_segment_chunked
 from utils import (
     simulate_multi_particle, 
     AnalysisMetrics, 
