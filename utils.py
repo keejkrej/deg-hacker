@@ -50,6 +50,21 @@ class AnalysisMetrics:
     figure_path: Optional[str] = None
 
 
+@dataclass
+class MultiSimulationData:
+    radii_nm: Sequence[float]
+    contrasts: Sequence[float]
+    noise_level: float
+    diffusions: Sequence[float]
+    x_step: float
+    t_step: float
+    n_t: int
+    n_x: int
+    kymograph_noisy: np.ndarray
+    kymograph_gt: np.ndarray
+    true_paths: np.ndarray
+
+
 METRIC_FIELDNAMES = [
     "method_label",
     "particle_radius_nm",
@@ -94,6 +109,50 @@ def simulate_single_particle(
         kymograph_noisy=kymograph_noisy,
         kymograph_gt=kymograph_gt,
         true_path=true_path,
+    )
+
+
+def simulate_multi_particle(
+    radii_nm,
+    contrasts,
+    noise_level,
+    x_step=0.5,
+    t_step=1.0,
+    n_t=4000,
+    n_x=256,
+    peak_width=1,
+):
+    """Simulate a multi-particle kymograph with independent radii/contrasts."""
+    radii_list = list(radii_nm)
+    contrasts_list = list(contrasts)
+
+    if len(radii_list) != len(contrasts_list):
+        raise ValueError("radii_nm and contrasts must have the same length")
+
+    diffusions = [get_diffusion_coefficient(r) for r in radii_list]
+    kymograph_noisy, kymograph_gt, true_paths = generate_kymograph(
+        length=n_t,
+        width=n_x,
+        diffusion=diffusions,
+        contrast=contrasts_list,
+        noise_level=noise_level,
+        peak_width=peak_width,
+        dx=x_step,
+        dt=t_step,
+    )
+
+    return MultiSimulationData(
+        radii_nm=radii_list,
+        contrasts=contrasts_list,
+        noise_level=noise_level,
+        diffusions=diffusions,
+        x_step=x_step,
+        t_step=t_step,
+        n_t=n_t,
+        n_x=n_x,
+        kymograph_noisy=kymograph_noisy,
+        kymograph_gt=kymograph_gt,
+        true_paths=true_paths,
     )
 
 

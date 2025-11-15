@@ -122,42 +122,45 @@ class SyntheticKymographDataset(Dataset):
 
 
 class ConvBlock(nn.Module):
-    def __init__(self, in_ch: int, out_ch: int) -> None:
+    def __init__(self, in_ch: int, out_ch: int, use_bn: bool = True) -> None:
         super().__init__()
-        self.net = nn.Sequential(
+        layers = [
             nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_ch) if use_bn else nn.Identity(),
             nn.ReLU(inplace=True),
             nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_ch) if use_bn else nn.Identity(),
             nn.ReLU(inplace=True),
-        )
+        ]
+        self.net = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
         return self.net(x)
 
 
 class TinyUNet(nn.Module):
-    """Minimal U-Net with three resolution levels."""
+    """U-Net with three resolution levels, batch normalization, and improved capacity."""
 
-    def __init__(self, base_channels: int = 32, use_residual: bool = False) -> None:
+    def __init__(self, base_channels: int = 48, use_residual: bool = False, use_bn: bool = True) -> None:
         super().__init__()
         self.use_residual = use_residual
         
-        self.enc1 = ConvBlock(1, base_channels)
-        self.enc2 = ConvBlock(base_channels, base_channels * 2)
-        self.enc3 = ConvBlock(base_channels * 2, base_channels * 4)
+        self.enc1 = ConvBlock(1, base_channels, use_bn=use_bn)
+        self.enc2 = ConvBlock(base_channels, base_channels * 2, use_bn=use_bn)
+        self.enc3 = ConvBlock(base_channels * 2, base_channels * 4, use_bn=use_bn)
 
         self.down = nn.MaxPool2d(2)
 
-        self.bottleneck = ConvBlock(base_channels * 4, base_channels * 8)
+        self.bottleneck = ConvBlock(base_channels * 4, base_channels * 8, use_bn=use_bn)
 
         self.up3 = nn.ConvTranspose2d(base_channels * 8, base_channels * 4, 2, stride=2)
-        self.dec3 = ConvBlock(base_channels * 8, base_channels * 4)
+        self.dec3 = ConvBlock(base_channels * 8, base_channels * 4, use_bn=use_bn)
 
         self.up2 = nn.ConvTranspose2d(base_channels * 4, base_channels * 2, 2, stride=2)
-        self.dec2 = ConvBlock(base_channels * 4, base_channels * 2)
+        self.dec2 = ConvBlock(base_channels * 4, base_channels * 2, use_bn=use_bn)
 
         self.up1 = nn.ConvTranspose2d(base_channels * 2, base_channels, 2, stride=2)
-        self.dec1 = ConvBlock(base_channels * 2, base_channels)
+        self.dec1 = ConvBlock(base_channels * 2, base_channels, use_bn=use_bn)
 
         self.out_conv = nn.Conv2d(base_channels, 1, kernel_size=1)
         
@@ -322,6 +325,9 @@ def train_denoiser(config: TrainingConfig, dataset: SyntheticKymographDataset) -
     model.train()
     total_start_time = time.time()
     
+    # Track losses for plotting
+    epoch_losses = []
+    
     for epoch in range(config.epochs):
         epoch_start_time = time.time()
         epoch_loss = 0.0
@@ -331,9 +337,6 @@ def train_denoiser(config: TrainingConfig, dataset: SyntheticKymographDataset) -
         zero_output_detections = 0
         output_stats = []
         gradient_norms = []
-        
-        print(f"\nEpoch {epoch + 1}/{config.epochs}")
-        print(f"  Processing batches...")
         
         for batch_idx, (noisy, clean) in enumerate(dataloader):
             noisy = noisy.to(config.device)
@@ -396,84 +399,64 @@ def train_denoiser(config: TrainingConfig, dataset: SyntheticKymographDataset) -
             batch_loss = loss.item()
             epoch_loss += batch_loss * noisy.size(0)
             batch_count += 1
-            
-            # Print progress every 50 batches or at the start/end
-            if (batch_idx + 1) % 50 == 0 or batch_idx == 0 or (batch_idx + 1) == len(dataloader):
-                status_msg = f"    Batch {batch_idx + 1}/{len(dataloader)}: loss={batch_loss:.6f}"
-                if is_zero_output:
-                    status_msg += " [ZERO OUTPUT DETECTED!]"
-                print(status_msg)
-                print(f"      Output stats: mean={denoised_mean:.6f}, max={denoised_max:.6f}, min={denoised_min:.6f}, std={denoised_std:.6f}")
-                if gradient_norms:
-                    print(f"      Gradient norm: {gradient_norms[-1]:.6f}")
         
         epoch_loss /= len(dataloader.dataset)
         epoch_time = time.time() - epoch_start_time
+        epoch_losses.append(epoch_loss)
         
         # Update learning rate scheduler if enabled
         if scheduler is not None:
             scheduler.step(epoch_loss)
+            current_lr = optimizer.param_groups[0]['lr']
+        else:
+            current_lr = config.lr
         
-        # Compute statistics for diagnostics
+        # Standard textbook-style print message
+        print(f"Epoch [{epoch + 1}/{config.epochs}] | Loss: {epoch_loss:.6f} | Time: {epoch_time:.2f}s | LR: {current_lr:.2e}")
+        
+        # Compute statistics for diagnostics (less verbose, only warnings)
         avg_output_mean = np.mean([s['mean'] for s in output_stats])
         avg_output_max = np.mean([s['max'] for s in output_stats])
-        avg_output_min = np.mean([s['min'] for s in output_stats])
-        avg_output_std = np.mean([s['std'] for s in output_stats])
         avg_grad_norm = np.mean(gradient_norms) if gradient_norms else 0.0
         
-        # Compute weight statistics
-        weight_stats = {}
-        for name, param in model.named_parameters():
-            if param.requires_grad:
-                weight_stats[name] = {
-                    'mean': param.data.mean().item(),
-                    'std': param.data.std().item(),
-                    'min': param.data.min().item(),
-                    'max': param.data.max().item(),
-                }
-        
-        print(f"  Epoch {epoch + 1}/{config.epochs} completed:")
-        print(f"    Average loss: {epoch_loss:.6f}")
-        print(f"    Time: {epoch_time:.2f}s")
-        print(f"    Batches processed: {batch_count}")
-        
-        # Zero output diagnostics
+        # Only print warnings if issues detected
         zero_pct = (zero_output_detections / batch_count) * 100
-        print(f"    Zero output detections: {zero_output_detections}/{batch_count} ({zero_pct:.1f}%)")
         if zero_output_detections > 0:
-            print(f"    ⚠️  WARNING: Model is outputting zeros! This suggests:")
-            print(f"       - Model may be collapsing to minimize loss (sparse ground truth)")
-            print(f"       - Gradients may be vanishing (check gradient norms)")
-            print(f"       - Sigmoid may be saturating to zero")
+            print(f"  ⚠️  WARNING: Zero outputs detected: {zero_output_detections}/{batch_count} ({zero_pct:.1f}%)")
+        if gradient_norms and avg_grad_norm < 1e-6:
+            print(f"  ⚠️  WARNING: Vanishing gradients detected (grad_norm: {avg_grad_norm:.6f})")
         
-        print(f"    Output statistics (avg): mean={avg_output_mean:.6f}, max={avg_output_max:.6f}, min={avg_output_min:.6f}, std={avg_output_std:.6f}")
-        if gradient_norms:
-            print(f"    Average gradient norm: {avg_grad_norm:.6f}")
-            if avg_grad_norm < 1e-6:
-                print(f"    ⚠️  WARNING: Very small gradient norm suggests vanishing gradients!")
-        
-        # Print weight statistics for key layers
-        if weight_stats:
-            print(f"    Weight statistics (sample layers):")
-            sample_layers = ['out_conv.weight', 'enc1.net.0.weight', 'bottleneck.net.0.weight']
-            for layer_name in sample_layers:
-                if layer_name in weight_stats:
-                    ws = weight_stats[layer_name]
-                    print(f"      {layer_name}: mean={ws['mean']:.6f}, std={ws['std']:.6f}, range=[{ws['min']:.6f}, {ws['max']:.6f}]")
-        
-        # Print overall progress
-        elapsed_time = time.time() - total_start_time
-        avg_time_per_epoch = elapsed_time / (epoch + 1)
-        remaining_epochs = config.epochs - (epoch + 1)
-        estimated_remaining = avg_time_per_epoch * remaining_epochs
-        print(f"    Elapsed: {elapsed_time:.2f}s | Est. remaining: {estimated_remaining:.2f}s")
+        # Print overall progress every few epochs
+        if (epoch + 1) % 5 == 0 or (epoch + 1) == config.epochs:
+            elapsed_time = time.time() - total_start_time
+            avg_time_per_epoch = elapsed_time / (epoch + 1)
+            remaining_epochs = config.epochs - (epoch + 1)
+            if remaining_epochs > 0:
+                estimated_remaining = avg_time_per_epoch * remaining_epochs
+                print(f"  Progress: {elapsed_time:.1f}s elapsed | ~{estimated_remaining:.1f}s remaining")
 
     total_time = time.time() - total_start_time
     print("\n" + "=" * 60)
     print(f"Training completed!")
     print(f"  Total time: {total_time:.2f}s ({total_time/60:.2f} minutes)")
     print(f"  Average time per epoch: {total_time/config.epochs:.2f}s")
+    print(f"  Final loss: {epoch_losses[-1]:.6f}")
+    print(f"  Best loss: {min(epoch_losses):.6f} (epoch {epoch_losses.index(min(epoch_losses)) + 1})")
     print("=" * 60)
+    
+    # Plot training loss
+    plt.figure(figsize=(10, 6))
+    plt.plot(range(1, len(epoch_losses) + 1), epoch_losses, 'b-', linewidth=2, label='Training Loss')
+    plt.xlabel('Epoch', fontsize=12)
+    plt.ylabel('Loss', fontsize=12)
+    plt.title('Training Loss Over Epochs', fontsize=14, fontweight='bold')
+    plt.grid(True, alpha=0.3)
+    plt.legend(fontsize=11)
+    plt.tight_layout()
+    loss_plot_path = "training_loss.png"
+    plt.savefig(loss_plot_path, dpi=150, bbox_inches='tight')
+    print(f"\nLoss plot saved to: {loss_plot_path}")
+    plt.close()
 
     return model
 
@@ -636,41 +619,57 @@ def visualize_denoising_results(
     
     print(f"\nGenerating {n_samples} test samples for visualization...")
     
-    # Generate test samples with varying parameters
-    test_params = [
-        {"radius": 5.0, "contrast": 0.7, "noise": 0.3},
-        {"radius": 10.0, "contrast": 0.9, "noise": 0.4},
-        {"radius": 7.5, "contrast": 0.6, "noise": 0.2},
+    # Generate test samples: mix of single and multi-trajectory examples
+    test_configs = [
+        {"type": "single", "radius": 5.0, "contrast": 0.7, "noise": 0.3},
+        {"type": "multi", "radii": [5.0, 10.0], "contrasts": [0.7, 0.5], "noise": 0.3},
+        {"type": "multi", "radii": [7.5, 12.0, 8.0], "contrasts": [0.8, 0.6, 0.5], "noise": 0.4},
     ]
     
-    # Ensure we have enough parameters for n_samples
-    while len(test_params) < n_samples:
-        test_params.append(test_params[len(test_params) % len(test_params)])
+    # Ensure we have enough configs for n_samples
+    while len(test_configs) < n_samples:
+        test_configs.append(test_configs[len(test_configs) % len(test_configs)])
     
     fig, axes = plt.subplots(n_samples, 3, figsize=(15, 5 * n_samples))
     if n_samples == 1:
         axes = axes.reshape(1, -1)
     
     for i in range(n_samples):
-        params = test_params[i]
-        radius = params["radius"]
-        contrast = params["contrast"]
-        noise = params["noise"]
+        config = test_configs[i]
         
-        # Use simulate_single_particle from utils.py
-        simulation = simulate_single_particle(
-            p=radius,
-            c=contrast,
-            n=noise,
-            x_step=0.5,
-            t_step=1.0,
-            n_t=length,
-            n_x=width,
-            peak_width=1.0,
-        )
-        
-        noisy = simulation.kymograph_noisy
-        gt = simulation.kymograph_gt
+        if config["type"] == "single":
+            # Single trajectory
+            simulation = simulate_single_particle(
+                p=config["radius"],
+                c=config["contrast"],
+                n=config["noise"],
+                x_step=0.5,
+                t_step=1.0,
+                n_t=length,
+                n_x=width,
+                peak_width=1.0,
+            )
+            noisy = simulation.kymograph_noisy
+            gt = simulation.kymograph_gt
+            title_info = f"r={config['radius']:.1f}nm, c={config['contrast']:.1f}, n={config['noise']:.1f}"
+        else:
+            # Multi-trajectory
+            radii = config["radii"]
+            contrasts = config["contrasts"]
+            noise = config["noise"]
+            diffusions = [get_diffusion_coefficient(r) for r in radii]
+            noisy, gt, true_paths = generate_kymograph(
+                length=length,
+                width=width,
+                diffusion=diffusions,
+                contrast=contrasts,
+                noise_level=noise,
+                peak_width=1.0,
+                dt=1.0,
+                dx=0.5,
+            )
+            n_traj = len(radii)
+            title_info = f"{n_traj} trajectories, n={noise:.1f}"
         
         # Denoise
         denoised = denoise_kymograph(model, noisy, device=device)
@@ -684,7 +683,7 @@ def visualize_denoising_results(
         vmin, vmax = 0, 1
         
         axes[i, 0].imshow(noisy.T, aspect="auto", origin="lower", vmin=vmin, vmax=vmax, cmap="gray")
-        axes[i, 0].set_title(f"Noisy Input\nMSE: {mse_noisy:.4f}\nr={radius:.1f}nm, c={contrast:.1f}, n={noise:.1f}")
+        axes[i, 0].set_title(f"Noisy Input\nMSE: {mse_noisy:.4f}\n{title_info}")
         axes[i, 0].set_xlabel("Time")
         axes[i, 0].set_ylabel("Position")
         
@@ -697,6 +696,11 @@ def visualize_denoising_results(
         axes[i, 2].set_title("Ground Truth")
         axes[i, 2].set_xlabel("Time")
         axes[i, 2].set_ylabel("Position")
+        
+        # Overlay true paths on ground truth for multi-trajectory
+        if config["type"] == "multi":
+            for path in true_paths:
+                axes[i, 2].plot(path, color='red', alpha=0.3, linewidth=0.5)
     
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
@@ -717,14 +721,15 @@ if __name__ == "__main__":
         max_trajectories=3,  # Up to 3 trajectories
     )
     # DDPM-style: Model always predicts noise to subtract
+    # Increased epochs for multi-trajectory training (more complex patterns to learn)
     config = TrainingConfig(
-        epochs=5,
+        epochs=12,  # Increased from 5 to handle multi-trajectory complexity
         batch_size=8,
         loss="l2",  # L2 loss on predicted noise vs true noise
         use_gradient_clipping=True,
         max_grad_norm=1.0,
-        use_residual_connection=False,
-        use_lr_scheduler=False,
+        use_residual_connection=True,  # Helps with gradient flow and training stability
+        use_lr_scheduler=True,  # Enable LR scheduler for better convergence
     )
     model = train_denoiser(config, dataset)
     save_model(model, "tiny_unet_denoiser.pth")
