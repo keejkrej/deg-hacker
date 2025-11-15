@@ -13,6 +13,7 @@ For each file, this script:
 """
 
 import os
+import sys
 import glob
 import numpy as np
 import torch
@@ -20,11 +21,10 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 from scipy.signal import find_peaks
 
-import sys
-from pathlib import Path
+# Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from train.multitask_model import load_multitask_model, denoise_and_segment_chunked, _default_device
-from multi_particle_unet import track_particles
+from inference.multi_particle_unet import track_particles
 from utils import (
     AnalysisMetrics,
     write_joint_metrics_csv,
