@@ -23,6 +23,8 @@ from torch import nn, optim
 from torch.utils.data import Dataset, DataLoader
 import matplotlib.pyplot as plt
 from tqdm import tqdm
+from scipy.optimize import linear_sum_assignment
+from scipy.ndimage import label
 
 # Add parent directory to path for imports (only needed if not installed as package)
 if str(Path(__file__).parent.parent) not in sys.path:
@@ -291,7 +293,7 @@ class MultiTaskConfig:
     denoise_loss_weight: float = 1.0  # Weight for denoising loss
     segment_loss_weight: float = 1.0  # Weight for segmentation loss
     denoise_loss: str = "l2"  # "l2" or "l1"
-    segment_loss: str = "ce"  # "ce" (CrossEntropy) or "dice" (Dice for multi-class)
+    segment_loss: str = "ce"  # "ce" (CrossEntropy with Hungarian matching) or "dice" (Dice for multi-class)
     use_gradient_clipping: bool = True
     max_grad_norm: float = 1.0
     use_lr_scheduler: bool = True
@@ -300,6 +302,163 @@ class MultiTaskConfig:
     save_best: bool = True  # Save best model based on total loss
     checkpoint_every: int = 1  # Save checkpoint every N epochs (1 = every epoch)
     segment_class_weights: Optional[Tuple[float, ...]] = None  # Class weights for segmentation (None = auto)
+
+
+def compute_instance_iou(mask_pred: np.ndarray, mask_gt: np.ndarray) -> float:
+    """Compute IoU between two binary instance masks."""
+    intersection = np.logical_and(mask_pred, mask_gt).sum()
+    union = np.logical_or(mask_pred, mask_gt).sum()
+    if union == 0:
+        return 0.0
+    return float(intersection / union)
+
+
+def extract_instances_from_mask(mask: np.ndarray, class_id: int) -> list[np.ndarray]:
+    """Extract individual instance masks for a given class from a multi-class mask.
+    
+    Returns list of binary masks, one per connected component.
+    """
+    binary = (mask == class_id).astype(np.uint8)
+    labeled, num_features = label(binary)
+    instances = []
+    for i in range(1, num_features + 1):
+        instances.append((labeled == i).astype(np.float32))
+    return instances
+
+
+def hungarian_matching_loss(
+    pred_logits: torch.Tensor,
+    target_mask: torch.Tensor,
+    n_classes: int,
+    base_criterion: nn.Module,
+) -> torch.Tensor:
+    """
+    Compute instance segmentation loss using Hungarian matching.
+    
+    For each sample in the batch:
+    1. Extract predicted instances (one per class > 0)
+    2. Extract ground truth instances (one per class > 0)
+    3. Compute IoU matrix between all predicted and GT instances
+    4. Use Hungarian matching to find optimal assignment
+    5. Compute loss only on matched pairs
+    
+    Parameters:
+    -----------
+    pred_logits : torch.Tensor
+        [B, C, H, W] predicted logits
+    target_mask : torch.Tensor
+        [B, H, W] ground truth class labels
+    n_classes : int
+        Number of classes (including background)
+    base_criterion : nn.Module
+        Base loss criterion (e.g., CrossEntropyLoss)
+    
+    Returns:
+    --------
+    loss : torch.Tensor
+        Scalar loss value
+    """
+    B, C, H, W = pred_logits.shape
+    device = pred_logits.device
+    
+    # Convert to numpy for instance extraction
+    pred_probs = torch.softmax(pred_logits, dim=1)  # [B, C, H, W]
+    pred_labels = torch.argmax(pred_logits, dim=1)  # [B, H, W]
+    
+    total_loss = 0.0
+    n_valid_samples = 0
+    
+    for b in range(B):
+        pred_mask_np = pred_labels[b].cpu().numpy()  # [H, W]
+        target_mask_np = target_mask[b].cpu().numpy()  # [H, W]
+        
+        # Extract GT instances (one per class > 0)
+        gt_instances = []
+        gt_classes = []
+        for class_id in range(1, n_classes):  # Skip background (0)
+            instances = extract_instances_from_mask(target_mask_np, class_id)
+            for inst in instances:
+                gt_instances.append(inst)
+                gt_classes.append(class_id)
+        
+        # Extract predicted instances (one per class > 0)
+        pred_instances = []
+        pred_classes = []
+        for class_id in range(1, n_classes):  # Skip background (0)
+            instances = extract_instances_from_mask(pred_mask_np, class_id)
+            for inst in instances:
+                pred_instances.append(inst)
+                pred_classes.append(class_id)
+        
+        # If no instances, use standard loss
+        if len(gt_instances) == 0 and len(pred_instances) == 0:
+            # Both empty - just compute standard loss for this sample
+            sample_loss = base_criterion(
+                pred_logits[b:b+1],  # [1, C, H, W]
+                target_mask[b:b+1]   # [1, H, W]
+            )
+            total_loss += sample_loss
+            n_valid_samples += 1
+            continue
+        
+        # Build cost matrix: -IoU (negative because we want to maximize IoU)
+        n_pred = len(pred_instances)
+        n_gt = len(gt_instances)
+        
+        if n_pred == 0 or n_gt == 0:
+            # Mismatch: penalize all unmatched instances
+            # Use standard loss but with high weight for unmatched
+            sample_loss = base_criterion(
+                pred_logits[b:b+1],
+                target_mask[b:b+1]
+            )
+            # Penalty for unmatched instances
+            if n_pred > 0:
+                sample_loss = sample_loss * (1.0 + 0.5 * n_pred)
+            if n_gt > 0:
+                sample_loss = sample_loss * (1.0 + 0.5 * n_gt)
+            total_loss += sample_loss
+            n_valid_samples += 1
+            continue
+        
+        # Compute IoU matrix
+        cost_matrix = np.zeros((n_pred, n_gt))
+        for i, pred_inst in enumerate(pred_instances):
+            for j, gt_inst in enumerate(gt_instances):
+                iou = compute_instance_iou(pred_inst, gt_inst)
+                cost_matrix[i, j] = -iou  # Negative because Hungarian minimizes
+        
+        # Hungarian matching
+        pred_indices, gt_indices = linear_sum_assignment(cost_matrix)
+        
+        # Create matched target mask: remap GT classes to match predicted classes
+        matched_target = target_mask_np.copy()
+        
+        # For matched pairs, remap GT class to predicted class
+        for pred_idx, gt_idx in zip(pred_indices, gt_indices):
+            pred_class = pred_classes[pred_idx]
+            gt_class = gt_classes[gt_idx]
+            gt_mask = (target_mask_np == gt_class)
+            matched_target[gt_mask] = pred_class
+        
+        # For unmatched GT instances, keep original class (will be penalized)
+        # For unmatched pred instances, they'll be penalized naturally
+        
+        # Convert back to tensor and compute loss
+        matched_target_tensor = torch.from_numpy(matched_target).long().to(device)
+        
+        sample_loss = base_criterion(
+            pred_logits[b:b+1],  # [1, C, H, W]
+            matched_target_tensor.unsqueeze(0)  # [1, H, W]
+        )
+        
+        total_loss += sample_loss
+        n_valid_samples += 1
+    
+    if n_valid_samples == 0:
+        return torch.tensor(0.0, device=device, requires_grad=True)
+    
+    return total_loss / n_valid_samples
 
 
 def dice_loss_multiclass(pred: torch.Tensor, target: torch.Tensor, n_classes: int, smooth: float = 1e-6) -> torch.Tensor:
@@ -365,7 +524,11 @@ def train_multitask_model(
             class_weights[0] = 0.1  # Down-weight background (most common)
             class_weights[1:] = 3.0  # Up-weight track classes (rare but important)
         print(f"  Segmentation class weights: {class_weights.cpu().numpy()}")
-        segment_criterion = nn.CrossEntropyLoss(weight=class_weights)
+        base_criterion = nn.CrossEntropyLoss(weight=class_weights)
+        # Wrap with Hungarian matching for instance segmentation
+        segment_criterion = lambda pred, target: hungarian_matching_loss(
+            pred, target, model.n_classes, base_criterion
+        )
     elif config.segment_loss == "dice":
         segment_criterion = lambda pred, target: dice_loss_multiclass(pred, target, model.n_classes)
     else:
