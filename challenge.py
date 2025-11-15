@@ -142,30 +142,45 @@ def process_single_particle_file(
     )
     
     # Check if we should run denoiser again
-    # Criteria: contrast increased significantly but noise is still relatively high
+    # Criteria: trigger when quality is poor or could be improved
     noise_input, contrast_input = estimate_noise_and_contrast(kymograph_noisy_norm)
     noise_denoised, contrast_denoised = estimate_noise_and_contrast(denoised)
     
     contrast_improvement = contrast_denoised / max(contrast_input, 1e-6)
     noise_reduction = noise_denoised / max(noise_input, 1e-6)
     
+    # Compute denormalized noise level for quality assessment
+    # Denormalize: denorm = norm * (max - min) + min + background
+    denoised_vis = denoised * (kymograph_max - kymograph_min) + kymograph_min + background_level
+    noise_denoised_abs, _ = estimate_noise_and_contrast(denoised_vis)
+    
     # Diagnostic: print criteria check
     print(f"  Denoising criteria check:")
-    print(f"    Contrast improvement: {contrast_improvement:.2f}x (need >1.2)")
-    print(f"    Noise reduction ratio: {noise_reduction:.2f}x (need >0.6, means {noise_reduction*100:.0f}% of noise remains)")
-    print(f"    Noise level: {noise_denoised:.4f} (need >0.03)")
+    print(f"    Contrast improvement: {contrast_improvement:.2f}x")
+    print(f"    Noise reduction ratio: {noise_reduction:.2f}x ({noise_reduction*100:.0f}% of noise remains)")
+    print(f"    Normalized noise: {noise_denoised:.4f}")
+    print(f"    Denormalized noise: {noise_denoised_abs:.4f}")
     
-    # Run again if: contrast improved significantly (>1.2x) but noise reduction is modest (>0.6x)
-    # and noise level is still relatively high (>0.03)
-    # Relaxed criteria: lower thresholds to trigger more often for challenging cases
+    # Trigger iterative denoising if:
+    # 1. Contrast improvement is modest (<1.3x) OR
+    # 2. Denormalized noise is high (>0.5) OR  
+    # 3. Contrast improved (>1.1x) but normalized noise is still high (>0.02)
+    # This should catch files 9+ where quality degrades
     max_iterations = 2
     iteration = 1
-    should_rerun = (contrast_improvement > 1.2 and 
-                    noise_reduction > 0.6 and 
-                    noise_denoised > 0.03)
+    should_rerun = (contrast_improvement < 1.3 or 
+                    noise_denoised_abs > 0.5 or
+                    (contrast_improvement > 1.1 and noise_denoised > 0.02))
     
     if should_rerun:
-        print(f"  ✓ Criteria met for iterative denoising")
+        reason = []
+        if contrast_improvement < 1.3:
+            reason.append(f"contrast improvement low ({contrast_improvement:.2f}x)")
+        if noise_denoised_abs > 0.5:
+            reason.append(f"denormalized noise high ({noise_denoised_abs:.4f})")
+        if contrast_improvement > 1.1 and noise_denoised > 0.02:
+            reason.append(f"contrast OK but normalized noise high ({noise_denoised:.4f})")
+        print(f"  ✓ Criteria met for iterative denoising: {', '.join(reason)}")
     
     while (iteration < max_iterations and should_rerun):
         print(f"  Iteration {iteration + 1}: Contrast improved {contrast_improvement:.2f}x, but noise reduction only {noise_reduction:.2f}x")
@@ -189,10 +204,14 @@ def process_single_particle_file(
         contrast_improvement = contrast_denoised / max(contrast_input, 1e-6)
         noise_reduction = noise_denoised / max(noise_input, 1e-6)
         
-        # Check if we should continue
-        should_rerun = (contrast_improvement > 1.2 and 
-                        noise_reduction > 0.6 and 
-                        noise_denoised > 0.03)
+        # Recompute denormalized noise
+        denoised_vis = denoised * (kymograph_max - kymograph_min) + kymograph_min + background_level
+        noise_denoised_abs, _ = estimate_noise_and_contrast(denoised_vis)
+        
+        # Check if we should continue (same criteria)
+        should_rerun = (contrast_improvement < 1.3 or 
+                        noise_denoised_abs > 0.5 or
+                        (contrast_improvement > 1.1 and noise_denoised > 0.02))
         iteration += 1
     
     if iteration > 1:
@@ -440,21 +459,47 @@ def process_multi_particle_file(
     )
     
     # Check if we should run denoiser again
-    # Criteria: contrast increased significantly but noise is still relatively high
+    # Criteria: trigger when quality is poor or could be improved
     noise_input, contrast_input = estimate_noise_and_contrast(kymograph_noisy_norm)
     noise_denoised, contrast_denoised = estimate_noise_and_contrast(denoised_norm)
     
     contrast_improvement = contrast_denoised / max(contrast_input, 1e-6)
     noise_reduction = noise_denoised / max(noise_input, 1e-6)
     
-    # Run again if: contrast improved significantly (>1.5x) but noise reduction is modest (<0.7x)
-    # and noise level is still relatively high (>0.05)
+    # Compute denormalized noise level for quality assessment
+    # Denormalize: denorm = norm * (max - min) + min + background
+    denoised_vis = denoised_norm * (kymograph_max - kymograph_min) + kymograph_min + background_level
+    noise_denoised_abs, _ = estimate_noise_and_contrast(denoised_vis)
+    
+    # Diagnostic: print criteria check
+    print(f"  Denoising criteria check:")
+    print(f"    Contrast improvement: {contrast_improvement:.2f}x")
+    print(f"    Noise reduction ratio: {noise_reduction:.2f}x ({noise_reduction*100:.0f}% of noise remains)")
+    print(f"    Normalized noise: {noise_denoised:.4f}")
+    print(f"    Denormalized noise: {noise_denoised_abs:.4f}")
+    
+    # Trigger iterative denoising if:
+    # 1. Contrast improvement is modest (<1.3x) OR
+    # 2. Denormalized noise is high (>0.5) OR  
+    # 3. Contrast improved (>1.1x) but normalized noise is still high (>0.02)
+    # This should catch files 9+ where quality degrades
     max_iterations = 2
     iteration = 1
-    while (iteration < max_iterations and 
-           contrast_improvement > 1.5 and 
-           noise_reduction > 0.7 and 
-           noise_denoised > 0.05):
+    should_rerun = (contrast_improvement < 1.3 or 
+                    noise_denoised_abs > 0.5 or
+                    (contrast_improvement > 1.1 and noise_denoised > 0.02))
+    
+    if should_rerun:
+        reason = []
+        if contrast_improvement < 1.3:
+            reason.append(f"contrast improvement low ({contrast_improvement:.2f}x)")
+        if noise_denoised_abs > 0.5:
+            reason.append(f"denormalized noise high ({noise_denoised_abs:.4f})")
+        if contrast_improvement > 1.1 and noise_denoised > 0.02:
+            reason.append(f"contrast OK but normalized noise high ({noise_denoised:.4f})")
+        print(f"  ✓ Criteria met for iterative denoising: {', '.join(reason)}")
+    
+    while (iteration < max_iterations and should_rerun):
         print(f"  Iteration {iteration + 1}: Contrast improved {contrast_improvement:.2f}x, but noise reduction only {noise_reduction:.2f}x")
         print(f"    Running denoiser again...")
         
@@ -475,6 +520,11 @@ def process_multi_particle_file(
         noise_denoised, contrast_denoised = estimate_noise_and_contrast(denoised_norm)
         contrast_improvement = contrast_denoised / max(contrast_input, 1e-6)
         noise_reduction = noise_denoised / max(noise_input, 1e-6)
+        
+        # Check if we should continue
+        should_rerun = (contrast_improvement > 1.2 and 
+                        noise_reduction > 0.6 and 
+                        noise_denoised > 0.03)
         iteration += 1
     
     if iteration > 1:
