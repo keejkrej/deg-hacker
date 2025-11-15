@@ -107,15 +107,31 @@ def process_single_particle_file(
     # Load kymograph
     kymograph_noisy = np.load(filepath).astype(np.float32)
     
-    # Normalize to [0, 1] range (model expects this)
-    kymograph_min = kymograph_noisy.min()
-    kymograph_max = kymograph_noisy.max()
+    # Challenge data format: background is gray (~0), particles are white (bright)
+    # Model expects: background ~0 (dark), particles bright
+    # Strategy: subtract background level, then normalize to [0,1]
+    
+    # Estimate background level (use low percentile to be robust to outliers)
+    background_level = np.percentile(kymograph_noisy, 10)  # 10th percentile as background
+    
+    # Subtract background to make it ~0
+    kymograph_bg_subtracted = kymograph_noisy - background_level
+    
+    # Normalize to [0, 1] range using signal range (model expects this)
+    signal_level = np.percentile(kymograph_bg_subtracted, 99)  # 99th percentile as signal
+    kymograph_min = kymograph_bg_subtracted.min()
+    kymograph_max = max(signal_level, kymograph_bg_subtracted.max())
+    
     if kymograph_max > kymograph_min:
-        kymograph_noisy_norm = (kymograph_noisy - kymograph_min) / (
-            kymograph_max - kymograph_min
+        kymograph_noisy_norm = np.clip(
+            (kymograph_bg_subtracted - kymograph_min) / (kymograph_max - kymograph_min),
+            0.0, 1.0
         )
     else:
-        kymograph_noisy_norm = kymograph_noisy - kymograph_min
+        kymograph_noisy_norm = np.clip(kymograph_bg_subtracted, 0.0, 1.0)
+    
+    print(f"  Background level: {background_level:.4f}, Signal level: {signal_level:.4f}")
+    print(f"  Normalized range: [{kymograph_noisy_norm.min():.4f}, {kymograph_noisy_norm.max():.4f}]")
     
     # Denoise
     denoised = denoise_kymograph_chunked(
