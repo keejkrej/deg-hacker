@@ -56,6 +56,29 @@ model = train_multitask_model(config, dataset)
 save_multitask_model(model, "models/multitask_unet.pth")
 ```
 
+## Resuming Training
+
+You can resume training from a checkpoint to continue interrupted training or fine-tune:
+
+```python
+config = MultiTaskConfig(
+    epochs=20,
+    resume_from="models/checkpoints/checkpoint_epoch_10.pth",  # Resume from this checkpoint
+    checkpoint_dir="models/checkpoints",
+    # ... other config options
+)
+
+model = train_multitask_model(config, dataset)
+```
+
+This will:
+- Load the model weights from the checkpoint
+- Restore optimizer and scheduler state
+- Resume training from the saved epoch
+- Continue saving checkpoints as configured
+
+**Note**: Checkpoints saved after this update include full training state (model, optimizer, scheduler, epoch, best_loss). Older checkpoints (model weights only) can still be loaded for inference but won't resume training state.
+
 ## Configuration Options
 
 ### Dataset Parameters (`MultiTaskDataset`)
@@ -80,6 +103,8 @@ save_multitask_model(model, "models/multitask_unet.pth")
 - `use_gradient_clipping`: Enable gradient clipping (default: True)
 - `max_grad_norm`: Maximum gradient norm for clipping (default: 1.0)
 - `use_lr_scheduler`: Enable learning rate scheduling (default: True)
+- `resume_from`: Path to checkpoint file to resume training from (default: None)
+- `resume_epoch`: Epoch number to resume from (if None, inferred from checkpoint)
 
 ## Model Architecture
 

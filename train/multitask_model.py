@@ -577,6 +577,12 @@ def train_multitask_model(
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode='min', factor=0.5, patience=2
         )
+        # Resume scheduler state if resuming
+        if config.resume_from and os.path.exists(config.resume_from):
+            checkpoint = torch.load(config.resume_from, map_location=config.device)
+            if 'scheduler_state_dict' in checkpoint:
+                scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+                print(f"  Resumed scheduler state")
     
     # Data loader
     dataloader = DataLoader(
@@ -595,9 +601,8 @@ def train_multitask_model(
         print(f"  Checkpoint directory: {config.checkpoint_dir}")
     
     model.train()
-    best_loss = float('inf')
     
-    for epoch in range(config.epochs):
+    for epoch in range(start_epoch, config.epochs):
         epoch_start_time = time.time()
         epoch_denoise_loss = 0.0
         epoch_segment_loss = 0.0
@@ -691,7 +696,17 @@ def train_multitask_model(
             best_loss = avg_total_loss
             if config.checkpoint_dir:
                 best_path = os.path.join(config.checkpoint_dir, "best_model.pth")
-                save_multitask_model(model, best_path)
+                # Save best model with full checkpoint
+                checkpoint = {
+                    'epoch': epoch + 1,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'best_loss': best_loss,
+                    'config': config,
+                }
+                if scheduler is not None:
+                    checkpoint['scheduler_state_dict'] = scheduler.state_dict()
+                torch.save(checkpoint, best_path)
                 print(f"  ✓ New best model saved (loss: {best_loss:.6f})")
         
         if scheduler is not None:
