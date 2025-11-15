@@ -14,12 +14,17 @@ from dataclasses import dataclass
 from typing import Tuple, Optional
 import time
 import os
+import sys
+from pathlib import Path
 
 import numpy as np
 import torch
 from torch import nn, optim
 from torch.utils.data import Dataset, DataLoader
 import matplotlib.pyplot as plt
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import simulate_single_particle, simulate_multi_particle
 from utils.helpers import generate_kymograph, get_diffusion_coefficient
