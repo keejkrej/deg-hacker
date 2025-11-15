@@ -1,7 +1,7 @@
 """
-Hackathon Challenge Script
+Challenge Set Inference Script
 
-Processes kymograph files from the Hackathon folder:
+Processes kymograph files from the Hackathon folder (unseen test data):
 - Single particle files: kymograph_noisy_*.npy
 - Multi-particle files: kymograph_noisy_multiple_particles_*.npy
 
@@ -10,6 +10,12 @@ For each file, this script:
 2. Denoises and segments using the trained multi-task U-Net model
 3. Tracks particles and estimates parameters
 4. Generates diagnostic plots and saves results
+5. Saves metrics to CSV
+
+Usage:
+    python inference/challenge.py
+    # Or with custom paths:
+    python inference/challenge.py --hackathon_dir Hackathon --model_path models/multitask_unet.pth
 """
 
 import os
