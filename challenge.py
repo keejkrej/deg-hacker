@@ -154,23 +154,29 @@ def process_single_particle_file(
     denoised_vis = denoised * (kymograph_max - kymograph_min) + kymograph_min + background_level
     noise_denoised_abs, _ = estimate_noise_and_contrast(denoised_vis)
     
+    # Also get noise from original input (for comparison)
+    noise_input_abs, _ = estimate_noise_and_contrast(kymograph_noisy)
+    
     # Diagnostic: print criteria check
     print(f"  Denoising criteria check:")
     print(f"    Contrast improvement: {contrast_improvement:.2f}x")
     print(f"    Noise reduction ratio: {noise_reduction:.2f}x ({noise_reduction*100:.0f}% of noise remains)")
     print(f"    Normalized noise: {noise_denoised:.4f}")
     print(f"    Denormalized noise: {noise_denoised_abs:.4f}")
+    print(f"    Original input noise: {noise_input_abs:.4f}")
     
     # Trigger iterative denoising if:
-    # 1. Contrast improvement is modest (<1.3x) OR
-    # 2. Denormalized noise is high (>0.5) OR  
-    # 3. Contrast improved (>1.1x) but normalized noise is still high (>0.02)
+    # 1. Contrast improvement is modest (<1.35x) OR
+    # 2. Denormalized noise is high relative to input (>0.3 * input_noise) OR  
+    # 3. Original input noise is very high (>0.8) OR
+    # 4. Contrast improved (>1.1x) but normalized noise is still high (>0.015)
     # This should catch files 9+ where quality degrades
     max_iterations = 2
     iteration = 1
-    should_rerun = (contrast_improvement < 1.3 or 
-                    noise_denoised_abs > 0.5 or
-                    (contrast_improvement > 1.1 and noise_denoised > 0.02))
+    should_rerun = (contrast_improvement < 1.35 or 
+                    noise_denoised_abs > 0.3 * noise_input_abs or
+                    noise_input_abs > 0.8 or
+                    (contrast_improvement > 1.1 and noise_denoised > 0.015))
     
     if should_rerun:
         reason = []
@@ -209,9 +215,10 @@ def process_single_particle_file(
         noise_denoised_abs, _ = estimate_noise_and_contrast(denoised_vis)
         
         # Check if we should continue (same criteria)
-        should_rerun = (contrast_improvement < 1.3 or 
-                        noise_denoised_abs > 0.5 or
-                        (contrast_improvement > 1.1 and noise_denoised > 0.02))
+        should_rerun = (contrast_improvement < 1.35 or 
+                        noise_denoised_abs > 0.3 * noise_input_abs or
+                        noise_input_abs > 0.8 or
+                        (contrast_improvement > 1.1 and noise_denoised > 0.015))
         iteration += 1
     
     if iteration > 1:
@@ -471,23 +478,29 @@ def process_multi_particle_file(
     denoised_vis = denoised_norm * (kymograph_max - kymograph_min) + kymograph_min + background_level
     noise_denoised_abs, _ = estimate_noise_and_contrast(denoised_vis)
     
+    # Also get noise from original input (for comparison)
+    noise_input_abs, _ = estimate_noise_and_contrast(kymograph_noisy)
+    
     # Diagnostic: print criteria check
     print(f"  Denoising criteria check:")
     print(f"    Contrast improvement: {contrast_improvement:.2f}x")
     print(f"    Noise reduction ratio: {noise_reduction:.2f}x ({noise_reduction*100:.0f}% of noise remains)")
     print(f"    Normalized noise: {noise_denoised:.4f}")
     print(f"    Denormalized noise: {noise_denoised_abs:.4f}")
+    print(f"    Original input noise: {noise_input_abs:.4f}")
     
     # Trigger iterative denoising if:
-    # 1. Contrast improvement is modest (<1.3x) OR
-    # 2. Denormalized noise is high (>0.5) OR  
-    # 3. Contrast improved (>1.1x) but normalized noise is still high (>0.02)
+    # 1. Contrast improvement is modest (<1.35x) OR
+    # 2. Denormalized noise is high relative to input (>0.3 * input_noise) OR  
+    # 3. Original input noise is very high (>0.8) OR
+    # 4. Contrast improved (>1.1x) but normalized noise is still high (>0.015)
     # This should catch files 9+ where quality degrades
     max_iterations = 2
     iteration = 1
-    should_rerun = (contrast_improvement < 1.3 or 
-                    noise_denoised_abs > 0.5 or
-                    (contrast_improvement > 1.1 and noise_denoised > 0.02))
+    should_rerun = (contrast_improvement < 1.35 or 
+                    noise_denoised_abs > 0.3 * noise_input_abs or
+                    noise_input_abs > 0.8 or
+                    (contrast_improvement > 1.1 and noise_denoised > 0.015))
     
     if should_rerun:
         reason = []
