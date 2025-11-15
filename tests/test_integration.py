@@ -9,17 +9,12 @@ import tempfile
 
 from denoiser import load_model, denoise_kymograph, save_model, TinyUNet
 from single_particle_unet import denoise_kymograph_chunked, analyze_particle
-# Import tracking from utils directory
-import sys
-import importlib.util
-from pathlib import Path
-tracking_path = Path(__file__).parent.parent / "utils" / "tracking.py"
-tracking_spec = importlib.util.spec_from_file_location("tracking", tracking_path)
-tracking_module = importlib.util.module_from_spec(tracking_spec)
-tracking_spec.loader.exec_module(tracking_module)
-analyze_multi_particle = tracking_module.analyze_multi_particle
-track_particles = tracking_module.track_particles
-from utils import simulate_single_particle, simulate_multi_particle
+from utils import (
+    analyze_multi_particle,
+    track_particles,
+    simulate_single_particle,
+    simulate_multi_particle,
+)
 
 
 class TestSingleParticlePipeline:
