@@ -281,16 +281,14 @@ def train_segmenter(
     
     # Load denoiser model
     print(f"Loading denoiser model from {config.denoiser_model_path}...")
-    denoiser_model = load_model(config.denoiser_model_path, device=config.device, base_channels=56, use_residual=True)
+    denoiser_model = load_model(config.denoiser_model_path, device=config.device, base_channels=48, use_residual=True)
     denoiser_model.eval()
     
     # Update dataset with denoiser model
     dataset.denoiser_model = denoiser_model
     dataset.denoiser_device = config.device
     
-    # Create segmentation model
-    # Use same base_channels as denoiser for transfer learning compatibility
-    # Note: denoiser uses base_channels=56, but we'll use 48 for segmentation (can still transfer)
+    # Create segmentation model (same base_channels as denoiser for full transfer learning)
     model = SegmentationUNet(base_channels=48, use_bn=True).to(config.device)
     
     # Transfer learning: copy weights from denoiser (except output layer)
@@ -300,9 +298,8 @@ def train_segmenter(
         segmenter_state = model.state_dict()
         
         # Copy matching layers (encoder, decoder, bottleneck)
-        # Note: base_channels differ (56 vs 48), so we can only copy layers with matching shapes
+        # With same base_channels=48, all layers should match except output
         copied_layers = 0
-        skipped_layers = []
         for name, param in denoiser_state.items():
             # Skip output layer (out_conv) - it's different (noise prediction vs probability)
             if name == "out_conv.weight" or name == "out_conv.bias":
@@ -314,12 +311,10 @@ def train_segmenter(
                     segmenter_state[name] = param.clone()
                     copied_layers += 1
                 else:
-                    skipped_layers.append(f"{name}: {segmenter_state[name].shape} vs {param.shape}")
+                    print(f"  Warning: Skipping {name}: shape mismatch ({segmenter_state[name].shape} vs {param.shape})")
         
         model.load_state_dict(segmenter_state)
         print(f"  Copied {copied_layers} layers from denoiser")
-        if skipped_layers:
-            print(f"  Skipped {len(skipped_layers)} layers due to shape mismatch (base_channels differ)")
         print("  Output layer (out_conv) randomly initialized for segmentation task")
     
     # Loss function
@@ -429,7 +424,7 @@ if __name__ == "__main__":
     # Create dataset
     print("Creating segmentation dataset...")
     # Load denoiser temporarily to pass to dataset
-    denoiser_model = load_model(denoiser_path, device=_default_device(), base_channels=56, use_residual=True)
+    denoiser_model = load_model(denoiser_path, device=_default_device(), base_channels=48, use_residual=True)
     denoiser_model.eval()
     
     dataset = SegmentationDataset(

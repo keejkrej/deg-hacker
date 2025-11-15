@@ -292,7 +292,7 @@ def get_loss_fn(name: str, config: TrainingConfig | None = None) -> nn.Module:
 
 def train_denoiser(config: TrainingConfig, dataset: SyntheticKymographDataset) -> TinyUNet:
     model = TinyUNet(
-        base_channels=56,  # Balanced capacity (between 48 and 64)
+        base_channels=48,  # Standard capacity
         use_residual=config.use_residual_connection
     ).to(config.device)
     dataloader = DataLoader(dataset, batch_size=config.batch_size, shuffle=True)
@@ -469,7 +469,7 @@ def save_model(model: nn.Module, path: str) -> None:
     torch.save(model.state_dict(), path)
 
 
-def load_model(path: str, device: str | None = None, base_channels: int = 56, use_residual: bool = True) -> TinyUNet:
+def load_model(path: str, device: str | None = None, base_channels: int = 48, use_residual: bool = True) -> TinyUNet:
     """
     Load a trained U-Net model from checkpoint.
     
