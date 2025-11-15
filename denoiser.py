@@ -292,6 +292,7 @@ def get_loss_fn(name: str, config: TrainingConfig | None = None) -> nn.Module:
 
 def train_denoiser(config: TrainingConfig, dataset: SyntheticKymographDataset) -> TinyUNet:
     model = TinyUNet(
+        base_channels=56,  # Balanced capacity (between 48 and 64)
         use_residual=config.use_residual_connection
     ).to(config.device)
     dataloader = DataLoader(dataset, batch_size=config.batch_size, shuffle=True)
@@ -304,7 +305,7 @@ def train_denoiser(config: TrainingConfig, dataset: SyntheticKymographDataset) -
     scheduler = None
     if config.use_lr_scheduler:
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='min', factor=0.5, patience=2, verbose=True
+            optimizer, mode='min', factor=0.5, patience=2
         )
 
     print(f"Starting training...")
@@ -406,8 +407,11 @@ def train_denoiser(config: TrainingConfig, dataset: SyntheticKymographDataset) -
         
         # Update learning rate scheduler if enabled
         if scheduler is not None:
+            old_lr = optimizer.param_groups[0]['lr']
             scheduler.step(epoch_loss)
             current_lr = optimizer.param_groups[0]['lr']
+            if current_lr != old_lr:
+                print(f"  LR reduced: {old_lr:.2e} → {current_lr:.2e}")
         else:
             current_lr = config.lr
         
@@ -465,9 +469,25 @@ def save_model(model: nn.Module, path: str) -> None:
     torch.save(model.state_dict(), path)
 
 
-def load_model(path: str, device: str | None = None) -> TinyUNet:
+def load_model(path: str, device: str | None = None, base_channels: int = 56, use_residual: bool = True) -> TinyUNet:
+    """
+    Load a trained U-Net model from checkpoint.
+    
+    Parameters:
+    -----------
+    path : str
+        Path to the model checkpoint file
+    device : str, optional
+        Device to load the model on
+    base_channels : int
+        Base channels used when training the model (default: 56)
+        Must match the architecture used during training
+    use_residual : bool
+        Whether residual connection was used during training (default: True)
+        Must match the training configuration
+    """
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-    model = TinyUNet().to(device)
+    model = TinyUNet(base_channels=base_channels, use_residual=use_residual).to(device)
     state = torch.load(path, map_location=device)
     model.load_state_dict(state)
     model.eval()
@@ -724,7 +744,7 @@ if __name__ == "__main__":
     # Increased epochs for multi-trajectory training (more complex patterns to learn)
     config = TrainingConfig(
         epochs=12,  # Increased from 5 to handle multi-trajectory complexity
-        batch_size=8,
+        batch_size=10,  # Balanced: larger than 8 but safe for VRAM
         loss="l2",  # L2 loss on predicted noise vs true noise
         use_gradient_clipping=True,
         max_grad_norm=1.0,
