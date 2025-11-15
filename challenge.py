@@ -539,9 +539,10 @@ def process_multi_particle_file(
         noise_denoised_abs, _ = estimate_noise_and_contrast(denoised_vis)
         
         # Check if we should continue (same criteria)
-        should_rerun = (contrast_improvement < 1.3 or 
-                        noise_denoised_abs > 0.5 or
-                        (contrast_improvement > 1.1 and noise_denoised > 0.02))
+        should_rerun = (contrast_improvement < 1.35 or 
+                        noise_denoised_abs > 0.3 * noise_input_abs or
+                        noise_input_abs > 0.8 or
+                        (contrast_improvement > 1.1 and noise_denoised > 0.015))
         iteration += 1
     
     if iteration > 1:
