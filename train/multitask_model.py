@@ -22,6 +22,7 @@ import torch
 from torch import nn, optim
 from torch.utils.data import Dataset, DataLoader
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 # Add parent directory to path for imports (only needed if not installed as package)
 if str(Path(__file__).parent.parent) not in sys.path:
@@ -387,7 +388,15 @@ def train_multitask_model(
         epoch_total_loss = 0.0
         batch_count = 0
         
-        for batch_idx, (noisy, true_noise, true_mask) in enumerate(dataloader):
+        # Progress bar for batches in this epoch
+        pbar = tqdm(
+            enumerate(dataloader),
+            total=len(dataloader),
+            desc=f"Epoch {epoch+1}/{config.epochs}",
+            unit="batch"
+        )
+        
+        for batch_idx, (noisy, true_noise, true_mask) in pbar:
             noisy = noisy.to(config.device)
             true_noise = true_noise.to(config.device)
             true_mask = true_mask.to(config.device)
@@ -424,13 +433,22 @@ def train_multitask_model(
             epoch_segment_loss += segment_loss.item()
             epoch_total_loss += total_loss.item()
             batch_count += 1
+            
+            # Update progress bar with current losses
+            pbar.set_postfix({
+                'denoise': f'{denoise_loss.item():.4f}',
+                'segment': f'{segment_loss.item():.4f}',
+                'total': f'{total_loss.item():.4f}'
+            })
+        
+        pbar.close()
         
         avg_denoise_loss = epoch_denoise_loss / batch_count
         avg_segment_loss = epoch_segment_loss / batch_count
         avg_total_loss = epoch_total_loss / batch_count
         epoch_time = time.time() - epoch_start_time
         
-        print(f"Epoch {epoch + 1}/{config.epochs}: "
+        print(f"Epoch {epoch + 1}/{config.epochs} completed: "
               f"Total={avg_total_loss:.6f}, "
               f"Denoise={avg_denoise_loss:.6f}, "
               f"Segment={avg_segment_loss:.6f}, "
