@@ -150,7 +150,8 @@ def process_single_particle_file(
     if background_std > median_filter_threshold:
         from scipy.signal import medfilt
         print(f"  Applying median filter (background std={background_std:.4f} > {median_filter_threshold:.4f})...")
-        denoised = medfilt(denoised, kernel_size=(5, 3))
+        # Use larger kernel for sparse noise: (9, 5) = 9 time steps, 5 spatial pixels
+        denoised = medfilt(denoised, kernel_size=(9, 5))
     else:
         print(f"  Skipping median filter (background std={background_std:.4f} <= {median_filter_threshold:.4f})")
     
@@ -399,10 +400,19 @@ def process_multi_particle_file(
         model, kymograph_noisy_norm, device=device, chunk_size=512, overlap=64
     )
     
-    # Apply median filter to remove remaining non-Gaussian noise
-    from scipy.signal import medfilt
-    print(f"  Applying median filter to remove remaining noise...")
-    denoised_norm = medfilt(denoised_norm, kernel_size=(5, 3))
+    # Check background noise level (std of 0-80 percentile regions, outside tracks)
+    # Only apply median filter if background noise is high
+    background_mask = denoised_norm <= np.percentile(denoised_norm, 80)
+    background_std = np.std(denoised_norm[background_mask]) if np.any(background_mask) else 0.0
+    median_filter_threshold = 0.01  # Apply if background std > 0.01
+    
+    if background_std > median_filter_threshold:
+        from scipy.signal import medfilt
+        print(f"  Applying median filter (background std={background_std:.4f} > {median_filter_threshold:.4f})...")
+        # Use larger kernel for sparse noise: (9, 5) = 9 time steps, 5 spatial pixels
+        denoised_norm = medfilt(denoised_norm, kernel_size=(9, 5))
+    else:
+        print(f"  Skipping median filter (background std={background_std:.4f} <= {median_filter_threshold:.4f})")
     
     # Diagnostic: check denoised output
     noise_input, contrast_input = estimate_noise_and_contrast(kymograph_noisy_norm)
