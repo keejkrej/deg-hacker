@@ -1,0 +1,503 @@
+"""Train a multi-task U-Net that outputs both denoised kymograph and segmentation mask.
+
+This single model performs both tasks:
+1. Denoising: Predicts noise to subtract (DDPM-style)
+2. Segmentation: Outputs probability map of particle locations
+
+Benefits:
+- Shared encoder learns common features
+- More efficient than two separate models
+- Better feature learning through multi-task learning
+"""
+
+from dataclasses import dataclass
+from typing import Tuple, Optional
+import time
+import os
+
+import numpy as np
+import torch
+from torch import nn, optim
+from torch.utils.data import Dataset, DataLoader
+import matplotlib.pyplot as plt
+
+from utils import simulate_single_particle, simulate_multi_particle
+from helpers import generate_kymograph, get_diffusion_coefficient
+from denoiser import ConvBlock, _default_device
+
+
+class MultiTaskUNet(nn.Module):
+    """U-Net with two output heads: denoising and segmentation.
+    
+    Architecture:
+    - Shared encoder-decoder backbone
+    - Two output heads:
+      1. Denoising head: predicts noise (DDPM-style)
+      2. Segmentation head: predicts probability map (sigmoid)
+    """
+    
+    def __init__(self, base_channels: int = 48, use_bn: bool = True) -> None:
+        super().__init__()
+        
+        # Shared encoder
+        self.enc1 = ConvBlock(1, base_channels, use_bn=use_bn)
+        self.enc2 = ConvBlock(base_channels, base_channels * 2, use_bn=use_bn)
+        self.enc3 = ConvBlock(base_channels * 2, base_channels * 4, use_bn=use_bn)
+        
+        self.down = nn.MaxPool2d(2)
+        
+        self.bottleneck = ConvBlock(base_channels * 4, base_channels * 8, use_bn=use_bn)
+        
+        # Shared decoder
+        self.up3 = nn.ConvTranspose2d(base_channels * 8, base_channels * 4, 2, stride=2)
+        self.dec3 = ConvBlock(base_channels * 8, base_channels * 4, use_bn=use_bn)
+        
+        self.up2 = nn.ConvTranspose2d(base_channels * 4, base_channels * 2, 2, stride=2)
+        self.dec2 = ConvBlock(base_channels * 4, base_channels * 2, use_bn=use_bn)
+        
+        self.up1 = nn.ConvTranspose2d(base_channels * 2, base_channels, 2, stride=2)
+        self.dec1 = ConvBlock(base_channels * 2, base_channels, use_bn=use_bn)
+        
+        # Two output heads
+        # Head 1: Denoising (predicts noise, no activation)
+        self.denoise_head = nn.Conv2d(base_channels, 1, kernel_size=1)
+        nn.init.xavier_uniform_(self.denoise_head.weight, gain=0.1)
+        nn.init.constant_(self.denoise_head.bias, 0.0)
+        
+        # Head 2: Segmentation (predicts probability map, sigmoid activation)
+        self.segment_head = nn.Conv2d(base_channels, 1, kernel_size=1)
+        nn.init.xavier_uniform_(self.segment_head.weight, gain=1.0)
+        nn.init.constant_(self.segment_head.bias, 0.0)
+    
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Forward pass returns (predicted_noise, segmentation_mask)."""
+        e1 = self.enc1(x)
+        e2 = self.enc2(self.down(e1))
+        e3 = self.enc3(self.down(e2))
+        
+        b = self.bottleneck(self.down(e3))
+        
+        d3 = self.up3(b)
+        if d3.shape[2:] != e3.shape[2:]:
+            d3 = torch.nn.functional.interpolate(d3, size=e3.shape[2:], mode='bilinear', align_corners=False)
+        d3 = torch.cat([d3, e3], dim=1)
+        d3 = self.dec3(d3)
+        
+        d2 = self.up2(d3)
+        if d2.shape[2:] != e2.shape[2:]:
+            d2 = torch.nn.functional.interpolate(d2, size=e2.shape[2:], mode='bilinear', align_corners=False)
+        d2 = torch.cat([d2, e2], dim=1)
+        d2 = self.dec2(d2)
+        
+        d1 = self.up1(d2)
+        if d1.shape[2:] != e1.shape[2:]:
+            d1 = torch.nn.functional.interpolate(d1, size=e1.shape[2:], mode='bilinear', align_corners=False)
+        d1 = torch.cat([d1, e1], dim=1)
+        d1 = self.dec1(d1)
+        
+        # Two output heads
+        predicted_noise = self.denoise_head(d1)  # No activation (can be positive/negative)
+        segmentation_mask = torch.sigmoid(self.segment_head(d1))  # Probability map [0, 1]
+        
+        return predicted_noise, segmentation_mask
+
+
+def create_segmentation_mask(paths: np.ndarray, shape: Tuple[int, int], 
+                             peak_width_samples: float = 2.0) -> np.ndarray:
+    """Create a binary/soft segmentation mask from particle paths."""
+    length, width = shape
+    mask = np.zeros((length, width), dtype=np.float32)
+    
+    # Handle single particle case
+    if paths.ndim == 1:
+        paths = paths.reshape(1, -1)
+    
+    n_particles, path_length = paths.shape
+    xs = np.arange(width, dtype=np.float32)
+    
+    for t in range(min(length, path_length)):
+        for i in range(n_particles):
+            pos = paths[i, t]
+            if not np.isnan(pos):
+                # Create Gaussian around particle position
+                gaussian = np.exp(-0.5 * ((xs - pos) / peak_width_samples) ** 2)
+                mask[t] = np.maximum(mask[t], gaussian)
+    
+    mask = np.clip(mask, 0.0, 1.0)
+    return mask
+
+
+class MultiTaskDataset(Dataset):
+    """Dataset for multi-task training: noisy kymograph -> (noise, segmentation_mask)."""
+    
+    def __init__(
+        self,
+        length: int = 512,
+        width: int = 512,
+        radii_nm: Tuple[float, float] = (3.0, 15.0),
+        contrast: Tuple[float, float] = (0.5, 1.0),
+        noise_level: Tuple[float, float] = (0.1, 0.5),
+        seed: Optional[int] = None,
+        peak_width: float = 1.0,
+        dt: float = 1.0,
+        dx: float = 0.5,
+        n_samples: int = 1024,
+        multi_trajectory_prob: float = 0.3,
+        max_trajectories: int = 3,
+        mask_peak_width_samples: float = 2.0,
+    ) -> None:
+        self.length = length
+        self.width = width
+        self.radii_nm = radii_nm
+        self.contrast = contrast
+        self.noise_level = noise_level
+        self.peak_width = peak_width
+        self.dt = dt
+        self.dx = dx
+        self.n_samples = n_samples
+        self.multi_trajectory_prob = multi_trajectory_prob
+        self.max_trajectories = max_trajectories
+        self.mask_peak_width_samples = mask_peak_width_samples
+        self.rng = np.random.default_rng(seed)
+    
+    def __len__(self) -> int:
+        return self.n_samples
+    
+    def sample_parameters(self, n_particles: int = 1) -> Tuple[list[float], list[float], float]:
+        """Sample parameters for n_particles trajectories."""
+        radii = [float(self.rng.uniform(*self.radii_nm)) for _ in range(n_particles)]
+        contrasts = [float(self.rng.uniform(*self.contrast)) for _ in range(n_particles)]
+        noise = float(self.rng.uniform(*self.noise_level))
+        return radii, contrasts, noise
+    
+    def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # Decide number of trajectories
+        if self.rng.random() < self.multi_trajectory_prob:
+            n_particles = self.rng.integers(2, self.max_trajectories + 1)
+        else:
+            n_particles = 1
+        
+        radii, contrasts, noise = self.sample_parameters(n_particles)
+        
+        # Generate kymograph
+        if n_particles == 1:
+            simulation = simulate_single_particle(
+                p=radii[0],
+                c=contrasts[0],
+                n=noise,
+                x_step=self.dx,
+                t_step=self.dt,
+                n_t=self.length,
+                n_x=self.width,
+                peak_width=self.peak_width,
+            )
+            noisy = simulation.kymograph_noisy
+            gt = simulation.kymograph_gt
+            paths = simulation.true_path
+            if paths.ndim == 1:
+                paths = paths.reshape(1, -1)
+        else:
+            diffusions = [get_diffusion_coefficient(r) for r in radii]
+            noisy, gt, paths = generate_kymograph(
+                length=self.length,
+                width=self.width,
+                diffusion=diffusions,
+                contrast=contrasts,
+                noise_level=noise,
+                peak_width=self.peak_width,
+                dt=self.dt,
+                dx=self.dx,
+            )
+        
+        # Compute true noise (for denoising task)
+        true_noise = noisy - gt
+        
+        # Create segmentation mask (for segmentation task)
+        peak_width_samples = self.peak_width / self.dx
+        mask = create_segmentation_mask(
+            paths,
+            shape=(self.length, self.width),
+            peak_width_samples=max(peak_width_samples, self.mask_peak_width_samples)
+        )
+        
+        # Convert to tensors
+        noisy_tensor = torch.from_numpy(noisy).unsqueeze(0).float()
+        noise_tensor = torch.from_numpy(true_noise).unsqueeze(0).float()
+        mask_tensor = torch.from_numpy(mask).unsqueeze(0).float()
+        
+        return noisy_tensor, noise_tensor, mask_tensor
+
+
+@dataclass
+class MultiTaskConfig:
+    """Configuration for multi-task model training."""
+    epochs: int = 12
+    batch_size: int = 8
+    learning_rate: float = 1e-3
+    denoise_loss_weight: float = 1.0  # Weight for denoising loss
+    segment_loss_weight: float = 1.0  # Weight for segmentation loss
+    denoise_loss: str = "l2"  # "l2" or "l1"
+    segment_loss: str = "bce"  # "bce" or "dice"
+    use_gradient_clipping: bool = True
+    max_grad_norm: float = 1.0
+    use_lr_scheduler: bool = True
+    device: str = _default_device()
+
+
+def dice_loss(pred: torch.Tensor, target: torch.Tensor, smooth: float = 1e-6) -> torch.Tensor:
+    """Dice loss for segmentation."""
+    pred_flat = pred.view(-1)
+    target_flat = target.view(-1)
+    
+    intersection = (pred_flat * target_flat).sum()
+    dice = (2.0 * intersection + smooth) / (pred_flat.sum() + target_flat.sum() + smooth)
+    
+    return 1.0 - dice
+
+
+def train_multitask_model(
+    config: MultiTaskConfig,
+    dataset: MultiTaskDataset,
+) -> MultiTaskUNet:
+    """Train the multi-task model."""
+    
+    # Create model
+    model = MultiTaskUNet(base_channels=48, use_bn=True).to(config.device)
+    
+    # Loss functions
+    if config.denoise_loss == "l2":
+        denoise_criterion = nn.MSELoss()
+    elif config.denoise_loss == "l1":
+        denoise_criterion = nn.L1Loss()
+    else:
+        raise ValueError(f"Unknown denoise loss: {config.denoise_loss}")
+    
+    if config.segment_loss == "bce":
+        segment_criterion = nn.BCELoss()
+    elif config.segment_loss == "dice":
+        segment_criterion = dice_loss
+    else:
+        raise ValueError(f"Unknown segment loss: {config.segment_loss}")
+    
+    # Optimizer
+    optimizer = optim.Adam(model.parameters(), lr=config.learning_rate)
+    
+    # Learning rate scheduler
+    scheduler = None
+    if config.use_lr_scheduler:
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='min', factor=0.5, patience=2
+        )
+    
+    # Data loader
+    dataloader = DataLoader(
+        dataset, batch_size=config.batch_size, shuffle=True, num_workers=0
+    )
+    
+    print(f"\nTraining multi-task model on {config.device}")
+    print(f"  Epochs: {config.epochs}")
+    print(f"  Batch size: {config.batch_size}")
+    print(f"  Learning rate: {config.learning_rate}")
+    print(f"  Denoise loss: {config.denoise_loss} (weight: {config.denoise_loss_weight})")
+    print(f"  Segment loss: {config.segment_loss} (weight: {config.segment_loss_weight})")
+    print(f"  Dataset size: {len(dataset)}")
+    
+    model.train()
+    
+    for epoch in range(config.epochs):
+        epoch_start_time = time.time()
+        epoch_denoise_loss = 0.0
+        epoch_segment_loss = 0.0
+        epoch_total_loss = 0.0
+        batch_count = 0
+        
+        for batch_idx, (noisy, true_noise, true_mask) in enumerate(dataloader):
+            noisy = noisy.to(config.device)
+            true_noise = true_noise.to(config.device)
+            true_mask = true_mask.to(config.device)
+            
+            optimizer.zero_grad()
+            
+            # Forward pass: get both outputs
+            pred_noise, pred_mask = model(noisy)
+            
+            # Compute losses
+            denoise_loss = denoise_criterion(pred_noise, true_noise)
+            if config.segment_loss == "dice":
+                segment_loss = segment_criterion(pred_mask, true_mask)
+            else:
+                segment_loss = segment_criterion(pred_mask, true_mask)
+            
+            # Combined loss
+            total_loss = (
+                config.denoise_loss_weight * denoise_loss +
+                config.segment_loss_weight * segment_loss
+            )
+            
+            # Backward pass
+            total_loss.backward()
+            
+            # Gradient clipping
+            if config.use_gradient_clipping:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), config.max_grad_norm)
+            
+            optimizer.step()
+            
+            epoch_denoise_loss += denoise_loss.item()
+            epoch_segment_loss += segment_loss.item()
+            epoch_total_loss += total_loss.item()
+            batch_count += 1
+        
+        avg_denoise_loss = epoch_denoise_loss / batch_count
+        avg_segment_loss = epoch_segment_loss / batch_count
+        avg_total_loss = epoch_total_loss / batch_count
+        epoch_time = time.time() - epoch_start_time
+        
+        print(f"Epoch {epoch + 1}/{config.epochs}: "
+              f"Total={avg_total_loss:.6f}, "
+              f"Denoise={avg_denoise_loss:.6f}, "
+              f"Segment={avg_segment_loss:.6f}, "
+              f"Time={epoch_time:.2f}s")
+        
+        if scheduler is not None:
+            scheduler.step(avg_total_loss)
+    
+    model.eval()
+    return model
+
+
+def save_multitask_model(model: MultiTaskUNet, path: str) -> None:
+    """Save multi-task model."""
+    torch.save(model.state_dict(), path)
+    print(f"Multi-task model saved to {path}")
+
+
+def load_multitask_model(path: str, device: str = None) -> MultiTaskUNet:
+    """Load multi-task model."""
+    if device is None:
+        device = _default_device()
+    
+    model = MultiTaskUNet(base_channels=48, use_bn=True).to(device)
+    model.load_state_dict(torch.load(path, map_location=device))
+    model.eval()
+    return model
+
+
+def denoise_and_segment_chunked(
+    model: MultiTaskUNet,
+    kymograph: np.ndarray,
+    device: str = None,
+    chunk_size: int = 512,
+    overlap: int = 64,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Apply multi-task model to kymograph with chunking.
+    
+    Returns:
+    --------
+    denoised : np.ndarray
+        Denoised kymograph, shape (time, width)
+    segmentation_mask : np.ndarray
+        Probability map, shape (time, width), values in [0, 1]
+    """
+    if device is None:
+        device = _default_device()
+    
+    model.eval()
+    time_len, width = kymograph.shape
+    
+    # If kymograph fits in one chunk, process directly
+    if time_len <= chunk_size:
+        with torch.no_grad():
+            input_tensor = torch.from_numpy(kymograph).unsqueeze(0).unsqueeze(0).float().to(device)
+            pred_noise, pred_mask = model(input_tensor)
+            denoised = torch.clamp(input_tensor - pred_noise, 0.0, 1.0).squeeze().cpu().numpy()
+            mask = pred_mask.squeeze().cpu().numpy()
+        return denoised, mask
+    
+    # Process in chunks with overlap
+    denoised = np.zeros((time_len, width), dtype=np.float32)
+    mask = np.zeros((time_len, width), dtype=np.float32)
+    weights = np.zeros((time_len, width), dtype=np.float32)
+    
+    # Create window function for blending
+    window = np.ones(chunk_size)
+    if overlap > 0:
+        fade_len = overlap // 2
+        window[:fade_len] = np.linspace(0, 1, fade_len)
+        window[-fade_len:] = np.linspace(1, 0, fade_len)
+    
+    with torch.no_grad():
+        start = 0
+        while start < time_len:
+            end = min(start + chunk_size, time_len)
+            chunk = kymograph[start:end]
+            
+            # Pad if needed
+            if chunk.shape[0] < chunk_size:
+                padding = np.zeros((chunk_size - chunk.shape[0], width), dtype=chunk.dtype)
+                chunk = np.vstack([chunk, padding])
+            
+            # Process chunk
+            chunk_tensor = torch.from_numpy(chunk).unsqueeze(0).unsqueeze(0).float().to(device)
+            pred_noise_chunk, pred_mask_chunk = model(chunk_tensor)
+            denoised_chunk = torch.clamp(chunk_tensor - pred_noise_chunk, 0.0, 1.0).squeeze().cpu().numpy()
+            mask_chunk = pred_mask_chunk.squeeze().cpu().numpy()
+            
+            # Extract actual size (remove padding)
+            actual_len = end - start
+            denoised_chunk = denoised_chunk[:actual_len]
+            mask_chunk = mask_chunk[:actual_len]
+            window_chunk = window[:actual_len]
+            
+            # Blend with window
+            weight_chunk = window_chunk[:, np.newaxis]
+            denoised[start:end] += denoised_chunk * weight_chunk
+            mask[start:end] += mask_chunk * weight_chunk
+            weights[start:end] += weight_chunk
+            
+            # Move to next chunk
+            start += chunk_size - overlap
+    
+    # Normalize by weights
+    denoised = np.divide(denoised, weights, out=np.zeros_like(denoised), where=weights > 0)
+    mask = np.divide(mask, weights, out=np.zeros_like(mask), where=weights > 0)
+    
+    return denoised, mask
+
+
+if __name__ == "__main__":
+    import os
+    
+    # Create dataset
+    print("Creating multi-task dataset...")
+    dataset = MultiTaskDataset(
+        n_samples=1024,
+        length=512,
+        width=512,
+        multi_trajectory_prob=0.3,
+        max_trajectories=3,
+        mask_peak_width_samples=2.0,
+    )
+    
+    # Training config
+    config = MultiTaskConfig(
+        epochs=12,
+        batch_size=8,
+        learning_rate=1e-3,
+        denoise_loss_weight=1.0,
+        segment_loss_weight=1.0,
+        denoise_loss="l2",
+        segment_loss="bce",
+        use_gradient_clipping=True,
+        max_grad_norm=1.0,
+        use_lr_scheduler=True,
+    )
+    
+    # Train
+    model = train_multitask_model(config, dataset)
+    
+    # Save
+    os.makedirs("models", exist_ok=True)
+    model_path = "models/multitask_unet.pth"
+    save_multitask_model(model, model_path)
+    print(f"\nMulti-task model saved to: {model_path}")
