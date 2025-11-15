@@ -5,12 +5,18 @@ Tests for multi-particle tracking functionality.
 import pytest
 import numpy as np
 
-from multi_particle_unet import (
-    track_particles,
-    _select_peak_candidates,
-    _assign_candidates,
-    _predict_positions,
-)
+# Import tracking from utils directory
+import sys
+import importlib.util
+from pathlib import Path
+tracking_path = Path(__file__).parent.parent / "utils" / "tracking.py"
+tracking_spec = importlib.util.spec_from_file_location("tracking", tracking_path)
+tracking_module = importlib.util.module_from_spec(tracking_spec)
+tracking_spec.loader.exec_module(tracking_module)
+track_particles = tracking_module.track_particles
+_select_peak_candidates = tracking_module._select_peak_candidates
+_assign_candidates = tracking_module._assign_candidates
+_predict_positions = tracking_module._predict_positions
 from utils import simulate_multi_particle
 
 

@@ -30,7 +30,14 @@ from scipy.signal import find_peaks
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from train.multitask_model import load_multitask_model, denoise_and_segment_chunked, _default_device
-from multi_particle_unet import track_particles
+# Import tracking from utils directory
+import sys
+import importlib.util
+tracking_path = Path(__file__).parent.parent / "utils" / "tracking.py"
+tracking_spec = importlib.util.spec_from_file_location("tracking", tracking_path)
+tracking_module = importlib.util.module_from_spec(tracking_spec)
+tracking_spec.loader.exec_module(tracking_module)
+track_particles = tracking_module.track_particles
 from utils import (
     AnalysisMetrics,
     write_joint_metrics_csv,

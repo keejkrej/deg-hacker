@@ -22,12 +22,17 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from train.multitask_model import load_multitask_model, _default_device, denoise_and_segment_chunked
-from utils import (
-    simulate_multi_particle, 
-    AnalysisMetrics, 
-    write_joint_metrics_csv,
-    estimate_noise_and_contrast,
-)
+# Import from parent utils.py (sibling file in parent directory)
+# Need to import utils.py explicitly since utils is a file, not a package
+import importlib.util
+utils_py_path = Path(__file__).parent.parent / "utils.py"
+utils_spec = importlib.util.spec_from_file_location("utils_module", utils_py_path)
+utils_module = importlib.util.module_from_spec(utils_spec)
+utils_spec.loader.exec_module(utils_module)
+simulate_multi_particle = utils_module.simulate_multi_particle
+AnalysisMetrics = utils_module.AnalysisMetrics
+write_joint_metrics_csv = utils_module.write_joint_metrics_csv
+estimate_noise_and_contrast = utils_module.estimate_noise_and_contrast
 
 
 @dataclass
