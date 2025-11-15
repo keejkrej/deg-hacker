@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "deg-hacker"
+version = "0.1.0"
+description = "Multi-task U-Net for kymograph denoising and particle segmentation"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "Your Name", email = "your.email@example.com"},
+]
+keywords = ["kymograph", "denoising", "segmentation", "particle-tracking", "unet"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Image Processing",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "numpy>=1.20.0",
+    "torch>=1.9.0",
+    "matplotlib>=3.3.0",
+    "scipy>=1.7.0",
+    "scikit-image>=0.18.0",
+    "scikit-learn>=0.24.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=6.0",
+    "pytest-cov>=2.12",
+]
+
+[project.urls]
+Homepage = "https://github.com/keejkrej/deg-hacker"
+Repository = "https://github.com/keejkrej/deg-hacker"
+Issues = "https://github.com/keejkrej/deg-hacker/issues"
+
+[tool.setuptools]
+packages = ["train", "inference", "utils", "baseline"]
+
+[tool.setuptools.package-data]
+"*" = ["*.md", "*.txt"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]

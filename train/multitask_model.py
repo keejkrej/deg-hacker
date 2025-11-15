@@ -23,8 +23,9 @@ from torch import nn, optim
 from torch.utils.data import Dataset, DataLoader
 import matplotlib.pyplot as plt
 
-# Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Add parent directory to path for imports (only needed if not installed as package)
+if str(Path(__file__).parent.parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import simulate_single_particle, simulate_multi_particle
 from utils.helpers import generate_kymograph, get_diffusion_coefficient
