@@ -638,9 +638,13 @@ def train_multitask_model(
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode='min', factor=0.5, patience=2
         )
-        # Resume scheduler state if resuming
-        if config.resume_from and os.path.exists(config.resume_from):
-            checkpoint = torch.load(config.resume_from, map_location=config.device)
+        # Resume scheduler state if resuming (only for new checkpoint format)
+        checkpoint_path_for_scheduler = config.resume_from
+        if checkpoint_path_for_scheduler is None and config.auto_resume and config.checkpoint_dir:
+            checkpoint_path_for_scheduler = _find_latest_checkpoint(config.checkpoint_dir)
+        
+        if checkpoint_path_for_scheduler and os.path.exists(checkpoint_path_for_scheduler):
+            checkpoint = torch.load(checkpoint_path_for_scheduler, map_location=config.device)
             if 'scheduler_state_dict' in checkpoint:
                 scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
                 print(f"  Resumed scheduler state")
