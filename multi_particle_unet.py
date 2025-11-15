@@ -20,7 +20,7 @@ from skimage.filters import threshold_otsu
 
 from denoiser import load_model, denoise_kymograph, _default_device
 from helpers import estimate_diffusion_msd_fit, get_particle_radius, find_max_subpixel
-from single_particle_unet import denoise_kymograph_chunked
+from multitask_model import denoise_and_segment_chunked
 from utils import (
     simulate_multi_particle, 
     AnalysisMetrics, 
@@ -856,7 +856,7 @@ def analyze_multi_particle(
         raise FileNotFoundError(f"Model file not found: {model_path}")
     model = load_model(model_path, device=device)
 
-    denoised = denoise_kymograph_chunked(
+        denoised, _ = denoise_and_segment_chunked(
         model,
         simulation.kymograph_noisy,
         device=device,
