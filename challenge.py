@@ -237,15 +237,17 @@ def process_single_particle_file(
     os.makedirs(output_dir, exist_ok=True)
     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
     
-    vmin, vmax = kymograph_noisy.min(), kymograph_noisy.max()
+    # Use percentile-based ranges to be robust to outliers
+    vmin_noisy = np.percentile(kymograph_noisy, 1)
+    vmax_noisy = np.percentile(kymograph_noisy, 99)
     
     # Top left: Noisy input
     axes[0, 0].imshow(
         kymograph_noisy.T,
         aspect="auto",
         origin="lower",
-        vmin=vmin,
-        vmax=vmax,
+        vmin=vmin_noisy,
+        vmax=vmax_noisy,
         cmap="gray",
     )
     axes[0, 0].set_title("Noisy Input")
@@ -255,12 +257,15 @@ def process_single_particle_file(
     # Top right: Denoised only (no track overlay)
     # Denormalize: denorm = norm * (max - min) + min + background
     denoised_vis = denoised * (kymograph_max - kymograph_min) + kymograph_min + background_level
+    # Use denoised range for better contrast
+    vmin_denoised = np.percentile(denoised_vis, 1)
+    vmax_denoised = np.percentile(denoised_vis, 99)
     im = axes[0, 1].imshow(
         denoised_vis.T,
         aspect="auto",
         origin="lower",
-        vmin=vmin,
-        vmax=vmax,
+        vmin=vmin_denoised,
+        vmax=vmax_denoised,
         cmap="gray",
     )
     axes[0, 1].set_title("Denoised Output")
