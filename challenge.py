@@ -109,7 +109,7 @@ def process_single_particle_file(
     
     # Challenge data format: background is gray (~0), particles are white (bright)
     # Model expects: background ~0 (dark), particles bright
-    # Strategy: subtract background level, then normalize to [0,1]
+    # Strategy: subtract background level, then normalize so background maps to 0
     
     # Estimate background level (use low percentile to be robust to outliers)
     background_level = np.percentile(kymograph_noisy, 10)  # 10th percentile as background
@@ -117,21 +117,24 @@ def process_single_particle_file(
     # Subtract background to make it ~0
     kymograph_bg_subtracted = kymograph_noisy - background_level
     
-    # Normalize to [0, 1] range using signal range (model expects this)
+    # Normalize to [0, 1] range: map background (now ~0) to 0, signal to 1
+    # Use signal level (99th percentile) as the upper bound
     signal_level = np.percentile(kymograph_bg_subtracted, 99)  # 99th percentile as signal
-    kymograph_min = kymograph_bg_subtracted.min()
-    kymograph_max = max(signal_level, kymograph_bg_subtracted.max())
     
-    if kymograph_max > kymograph_min:
-        kymograph_noisy_norm = np.clip(
-            (kymograph_bg_subtracted - kymograph_min) / (kymograph_max - kymograph_min),
-            0.0, 1.0
-        )
+    if signal_level > 0:
+        # Normalize: background (~0) -> 0, signal -> 1
+        kymograph_noisy_norm = np.clip(kymograph_bg_subtracted / signal_level, 0.0, 1.0)
     else:
+        # Fallback if no signal
         kymograph_noisy_norm = np.clip(kymograph_bg_subtracted, 0.0, 1.0)
+    
+    # Store normalization parameters for denormalization
+    kymograph_min = 0.0  # Background maps to 0
+    kymograph_max = signal_level  # Signal maps to 1
     
     print(f"  Background level: {background_level:.4f}, Signal level: {signal_level:.4f}")
     print(f"  Normalized range: [{kymograph_noisy_norm.min():.4f}, {kymograph_noisy_norm.max():.4f}]")
+    print(f"  Normalized bg percentile (10th): {np.percentile(kymograph_noisy_norm, 10):.4f}, signal percentile (99th): {np.percentile(kymograph_noisy_norm, 99):.4f}")
     
     # Denoise
     denoised = denoise_kymograph_chunked(
@@ -264,23 +267,18 @@ def process_single_particle_file(
     axes[0, 1].set_xlabel("Time")
     axes[0, 1].set_ylabel("Position")
     
-    # Bottom left: Denoised with track overlay
+    # Bottom left: Normalized input (what goes into the model)
     axes[1, 0].imshow(
-        denoised_vis.T,
+        kymograph_noisy_norm.T,
         aspect="auto",
         origin="lower",
-        vmin=vmin,
-        vmax=vmax,
+        vmin=0.0,
+        vmax=1.0,
         cmap="gray",
     )
-    # Plot track (convert from normalized to pixel coordinates for display)
-    if not np.all(np.isnan(estimated_path)):
-        track_plot = estimated_path * (kymograph_noisy.shape[1] - 1)
-        axes[1, 0].plot(track_plot, color="red", lw=1.5, alpha=0.8, label="Track")
-    axes[1, 0].set_title(f"Denoised & Tracked\nD={diffusion_processed:.4f} μm²/s")
+    axes[1, 0].set_title(f"Normalized Input\n(bg={background_level:.3f}, sig={signal_level:.3f})")
     axes[1, 0].set_xlabel("Time")
     axes[1, 0].set_ylabel("Position")
-    axes[1, 0].legend()
     
     # Bottom right: Estimated trajectory
     if not np.all(np.isnan(estimated_path_pixels)):
