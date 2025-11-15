@@ -20,7 +20,7 @@ from skimage.filters import threshold_otsu
 
 from denoiser import load_model, denoise_kymograph, _default_device
 from helpers import estimate_diffusion_msd_fit, get_particle_radius, find_max_subpixel
-from one_particle_unet import denoise_kymograph_chunked
+from single_particle_unet import denoise_kymograph_chunked
 from utils import (
     simulate_multi_particle, 
     AnalysisMetrics, 
@@ -868,7 +868,7 @@ def analyze_multi_particle(
         crossing_padding=2,  # Exclude 2 frames before/after crossing
     )
 
-    # Generate comprehensive report (like one_particle_unet.py)
+    # Generate comprehensive report (like single_particle_unet.py)
     metrics_list = summarize_multi_particle_analysis(
         simulation,
         denoised,
@@ -922,5 +922,5 @@ def run_parameter_grid(
 
 
 if __name__ == "__main__":
-    # Run parameter grid (like one_particle_unet.py)
+    # Run parameter grid (like single_particle_unet.py)
     run_parameter_grid()

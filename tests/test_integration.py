@@ -8,7 +8,7 @@ import os
 import tempfile
 
 from denoiser import load_model, denoise_kymograph, save_model, TinyUNet
-from one_particle_unet import denoise_kymograph_chunked, analyze_particle
+from single_particle_unet import denoise_kymograph_chunked, analyze_particle
 from multi_particle_unet import analyze_multi_particle, track_particles
 from utils import simulate_single_particle, simulate_multi_particle
 
@@ -38,15 +38,15 @@ class TestSingleParticlePipeline:
     def test_analyze_particle_pipeline(self, test_model):
         """Test full single-particle analysis."""
         # Temporarily override model path
-        import one_particle_unet
-        original_path = getattr(one_particle_unet, 'MODEL_PATH', None)
+        import single_particle_unet
+        original_path = getattr(single_particle_unet, 'MODEL_PATH', None)
         
         try:
             # This would normally load from default path, but we'll test the function directly
             simulation = simulate_single_particle(p=5.0, c=0.7, n=0.3, n_t=256, n_x=256)
             model = load_model(test_model, base_channels=56, use_residual=True)
             
-            from one_particle_unet import denoise_kymograph_chunked
+            from single_particle_unet import denoise_kymograph_chunked
             denoised = denoise_kymograph_chunked(
                 model, simulation.kymograph_noisy, chunk_size=128, overlap=32
             )
@@ -55,7 +55,7 @@ class TestSingleParticlePipeline:
             assert np.all(denoised >= 0) and np.all(denoised <= 1)
         finally:
             if original_path:
-                setattr(one_particle_unet, 'MODEL_PATH', original_path)
+                setattr(single_particle_unet, 'MODEL_PATH', original_path)
 
 
 class TestMultiParticlePipeline:
@@ -93,7 +93,7 @@ class TestMultiParticlePipeline:
         model = load_model(test_model, base_channels=56, use_residual=True)
         
         # Denoise
-        from one_particle_unet import denoise_kymograph_chunked
+        from single_particle_unet import denoise_kymograph_chunked
         denoised = denoise_kymograph_chunked(
             model, simulation.kymograph_noisy, chunk_size=128, overlap=32
         )

@@ -34,7 +34,7 @@ pip install -r requirements.txt
 ### Single Particle Analysis
 
 ```python
-from one_particle_unet import analyze_particle
+from single_particle_unet import analyze_particle
 
 # Analyze a single particle
 metrics = analyze_particle(p=5.0, c=0.7, n=0.3)
@@ -74,7 +74,7 @@ model = train_denoiser(config, dataset)
 ```
 deg-hacker/
 ├── denoiser.py              # U-Net model definition and training
-├── one_particle_unet.py     # Single-particle analysis pipeline
+├── single_particle_unet.py     # Single-particle analysis pipeline
 ├── multi_particle_unet.py   # Multi-particle tracking and analysis
 ├── helpers.py               # Utility functions (do not modify)
 ├── utils.py                 # Analysis utilities and data structures

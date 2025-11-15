@@ -53,7 +53,7 @@ def run_parameter_grid(
     particle_radii=DEFAULT_PARTICLE_RADII,
     contrasts=DEFAULT_CONTRASTS,
     noise_levels=DEFAULT_NOISE_LEVELS,
-    csv_path="metrics/one_particle_medfilt.csv",
+    csv_path="metrics/single_particle_medfilt.csv",
 ):
     metrics_rows = []
     for p in particle_radii:

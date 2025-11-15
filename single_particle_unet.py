@@ -222,7 +222,7 @@ def run_parameter_grid(
     particle_radii=[2.5, 5.0, 10.0],
     contrasts=[0.6, 0.8, 1.0],
     noise_levels=[0.1, 0.3, 0.5],
-    csv_path="metrics/one_particle_unet.csv",
+    csv_path="metrics/single_particle_unet.csv",
     model_path=None,
 ):
     """

@@ -1,3 +1,13 @@
+"""
+Analysis Utilities and Data Structures
+
+This module provides:
+- Simulation data structures (SimulationData, MultiSimulationData)
+- Analysis metrics (AnalysisMetrics)
+- Noise and contrast estimation
+- CSV export utilities
+"""
+
 import csv
 from dataclasses import dataclass, asdict
 import os
@@ -290,7 +300,7 @@ def summarize_analysis(
     os.makedirs(figure_dir, exist_ok=True)
     fig_filename = os.path.join(
         figure_dir,
-        f"one_particle_p_{simulation.p}_c_{simulation.c}_n_{simulation.n}.png",
+        f"single_particle_p_{simulation.p}_c_{simulation.c}_n_{simulation.n}.png",
     )
     fig.savefig(fig_filename)
     plt.close(fig)
