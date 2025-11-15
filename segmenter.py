@@ -272,7 +272,7 @@ def train_segmenter(
     
     # Load denoiser model
     print(f"Loading denoiser model from {config.denoiser_model_path}...")
-    denoiser_model = load_model(config.denoiser_model_path, device=config.device)
+    denoiser_model = load_model(config.denoiser_model_path, device=config.device, base_channels=56, use_residual=True)
     denoiser_model.eval()
     
     # Update dataset with denoiser model
@@ -297,7 +297,7 @@ def train_segmenter(
     scheduler = None
     if config.use_lr_scheduler:
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='min', factor=0.5, patience=2, verbose=True
+            optimizer, mode='min', factor=0.5, patience=2
         )
     
     # Data loader
@@ -388,7 +388,7 @@ if __name__ == "__main__":
     # Create dataset
     print("Creating segmentation dataset...")
     # Load denoiser temporarily to pass to dataset
-    denoiser_model = load_model(denoiser_path, device=_default_device())
+    denoiser_model = load_model(denoiser_path, device=_default_device(), base_channels=56, use_residual=True)
     denoiser_model.eval()
     
     dataset = SegmentationDataset(
