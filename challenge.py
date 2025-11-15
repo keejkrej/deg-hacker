@@ -136,13 +136,56 @@ def process_single_particle_file(
     print(f"  Normalized range: [{kymograph_noisy_norm.min():.4f}, {kymograph_noisy_norm.max():.4f}]")
     print(f"  Normalized bg percentile (10th): {np.percentile(kymograph_noisy_norm, 10):.4f}, signal percentile (99th): {np.percentile(kymograph_noisy_norm, 99):.4f}")
     
-    # Denoise
+    # Denoise (iteratively if needed)
     denoised = denoise_kymograph_chunked(
         model, kymograph_noisy_norm, device=device, chunk_size=512, overlap=64
     )
     
+    # Check if we should run denoiser again
+    # Criteria: contrast increased significantly but noise is still relatively high
+    noise_input, contrast_input = estimate_noise_and_contrast(kymograph_noisy_norm)
+    noise_denoised, contrast_denoised = estimate_noise_and_contrast(denoised)
+    
+    contrast_improvement = contrast_denoised / max(contrast_input, 1e-6)
+    noise_reduction = noise_denoised / max(noise_input, 1e-6)
+    
+    # Run again if: contrast improved significantly (>1.5x) but noise reduction is modest (<0.7x)
+    # and noise level is still relatively high (>0.05)
+    max_iterations = 2
+    iteration = 1
+    while (iteration < max_iterations and 
+           contrast_improvement > 1.5 and 
+           noise_reduction > 0.7 and 
+           noise_denoised > 0.05):
+        print(f"  Iteration {iteration + 1}: Contrast improved {contrast_improvement:.2f}x, but noise reduction only {noise_reduction:.2f}x")
+        print(f"    Running denoiser again...")
+        
+        # Renormalize the denoised output for another pass
+        denoised_bg = np.percentile(denoised, 10)
+        denoised_bg_sub = denoised - denoised_bg
+        denoised_sig = np.percentile(denoised_bg_sub, 99)
+        if denoised_sig > 0:
+            denoised_norm_2 = np.clip(denoised_bg_sub / denoised_sig, 0.0, 1.0)
+        else:
+            denoised_norm_2 = np.clip(denoised_bg_sub, 0.0, 1.0)
+        
+        denoised = denoise_kymograph_chunked(
+            model, denoised_norm_2, device=device, chunk_size=512, overlap=64
+        )
+        
+        # Update metrics
+        noise_denoised, contrast_denoised = estimate_noise_and_contrast(denoised)
+        contrast_improvement = contrast_denoised / max(contrast_input, 1e-6)
+        noise_reduction = noise_denoised / max(noise_input, 1e-6)
+        iteration += 1
+    
+    if iteration > 1:
+        print(f"  Completed {iteration} denoising iterations")
+    
     # Diagnostic: check denoised output
     print(f"  Denoised stats: min={denoised.min():.4f}, max={denoised.max():.4f}, mean={denoised.mean():.4f}, std={denoised.std():.4f}")
+    print(f"  Noise: {noise_input:.4f} -> {noise_denoised:.4f} ({noise_reduction:.2f}x reduction)")
+    print(f"  Contrast: {contrast_input:.4f} -> {contrast_denoised:.4f} ({contrast_improvement:.2f}x improvement)")
     
     # Track on normalized denoised (should be in [0,1] range)
     # The model outputs normalized values, tracking should work on these
