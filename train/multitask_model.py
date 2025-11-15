@@ -498,6 +498,40 @@ def dice_loss_multiclass(pred: torch.Tensor, target: torch.Tensor, n_classes: in
     return 1.0 - mean_dice
 
 
+def _find_latest_checkpoint(checkpoint_dir: str) -> Optional[str]:
+    """Find the latest checkpoint file in the checkpoint directory.
+    
+    Looks for files matching 'checkpoint_epoch_*.pth' and returns the one with highest epoch number.
+    Falls back to 'best_model.pth' if no epoch checkpoints found.
+    """
+    if not os.path.exists(checkpoint_dir):
+        return None
+    
+    import re
+    
+    # Find all checkpoint files
+    checkpoint_files = []
+    for filename in os.listdir(checkpoint_dir):
+        if filename.endswith('.pth'):
+            # Try to extract epoch number from filename
+            match = re.search(r'checkpoint_epoch_(\d+)\.pth', filename)
+            if match:
+                epoch_num = int(match.group(1))
+                checkpoint_files.append((epoch_num, os.path.join(checkpoint_dir, filename)))
+    
+    if checkpoint_files:
+        # Return checkpoint with highest epoch number
+        checkpoint_files.sort(key=lambda x: x[0], reverse=True)
+        return checkpoint_files[0][1]
+    
+    # Fallback to best_model.pth if it exists
+    best_model_path = os.path.join(checkpoint_dir, "best_model.pth")
+    if os.path.exists(best_model_path):
+        return best_model_path
+    
+    return None
+
+
 def train_multitask_model(
     config: MultiTaskConfig,
     dataset: MultiTaskDataset,
@@ -505,6 +539,8 @@ def train_multitask_model(
     """Train the multi-task model.
     
     If config.resume_from is set, loads checkpoint and resumes training from that point.
+    If config.auto_resume is True and checkpoint_dir is set, automatically finds and resumes
+    from the latest checkpoint.
     """
     
     # Create model
