@@ -127,30 +127,39 @@ def process_single_particle_file(
         denoised * (kymograph_max - kymograph_min) + kymograph_min
     )
     
-    # Track particle
+    # Track particle - use find_max_subpixel on entire kymograph (more efficient)
     from helpers import find_max_subpixel
     
-    estimated_path = []
-    for t in range(len(denoised_original_scale)):
-        row = denoised_original_scale[t]
-        # Check if row is valid (not all NaN, not all zeros)
-        if np.all(np.isnan(row)) or np.all(row == 0) or np.max(row) == np.min(row):
-            estimated_path.append(np.nan)
-        else:
-            try:
-                pos = find_max_subpixel(row)
-                if np.isnan(pos):
-                    estimated_path.append(np.nan)
-                else:
-                    estimated_path.append(pos)
-            except (ValueError, RuntimeError) as e:
-                # Fallback: use argmax if find_max_subpixel fails
+    try:
+        # find_max_subpixel expects 2D array and processes each row
+        estimated_path = find_max_subpixel(denoised_original_scale)
+    except (ValueError, RuntimeError, IndexError) as e:
+        # Fallback: process row by row manually
+        print(f"  ⚠ Warning: find_max_subpixel failed, using manual tracking: {e}")
+        estimated_path = []
+        for t in range(len(denoised_original_scale)):
+            row = denoised_original_scale[t]
+            # Check if row is valid
+            if np.all(np.isnan(row)) or np.all(row == 0) or (np.max(row) == np.min(row) and not np.isnan(row).any()):
+                estimated_path.append(np.nan)
+            else:
                 try:
                     max_idx = np.nanargmax(row)
-                    estimated_path.append(float(max_idx))
-                except ValueError:
+                    # Exclude extreme positions
+                    if max_idx == 0 or max_idx == len(row) - 1:
+                        estimated_path.append(float(max_idx))  # Use integer position
+                    else:
+                        # Parabolic interpolation for subpixel accuracy
+                        y0, y1, y2 = row[max_idx - 1], row[max_idx], row[max_idx + 1]
+                        denom = (y0 - 2 * y1 + y2)
+                        if abs(denom) < 1e-10:
+                            estimated_path.append(float(max_idx))
+                        else:
+                            delta = 0.5 * (y0 - y2) / denom
+                            estimated_path.append(float(max_idx + delta))
+                except (ValueError, IndexError):
                     estimated_path.append(np.nan)
-    estimated_path = np.array(estimated_path)
+        estimated_path = np.array(estimated_path)
     
     # Check if path is valid (has variation and enough points)
     valid_path = ~np.isnan(estimated_path)
