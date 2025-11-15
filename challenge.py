@@ -600,10 +600,13 @@ def run_challenge(
         match = re.search(r'kymograph_noisy_(\d+)\.npy', os.path.basename(filepath))
         return int(match.group(1)) if match else 0
     
-    single_files = sorted(
-        glob.glob(os.path.join(hackathon_dir, "kymograph_noisy_*.npy")),
-        key=extract_number
-    )
+    # Get single-particle files (exclude multi-particle files)
+    single_files_all = glob.glob(os.path.join(hackathon_dir, "kymograph_noisy_*.npy"))
+    single_files = [
+        f for f in single_files_all 
+        if 'multiple_particles' not in os.path.basename(f)
+    ]
+    single_files = sorted(single_files, key=extract_number)
     
     def extract_multi_number(filepath: str) -> int:
         """Extract number from filename like 'kymograph_noisy_multiple_particles_1.npy' -> 1"""
