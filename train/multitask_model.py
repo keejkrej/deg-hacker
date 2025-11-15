@@ -561,17 +561,29 @@ def train_multitask_model(
         print(f"\n📂 Resuming training from checkpoint: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location=config.device)
         
-        # Load model state
-        model.load_state_dict(checkpoint['model_state_dict'])
-        
-        # Load training state
-        start_epoch = checkpoint.get('epoch', 0)
-        if config.resume_epoch is not None:
-            start_epoch = config.resume_epoch
-        best_loss = checkpoint.get('best_loss', float('inf'))
-        
-        print(f"  Resuming from epoch {start_epoch + 1}")
-        print(f"  Best loss so far: {best_loss:.6f}")
+        # Handle both old format (just state_dict) and new format (full checkpoint)
+        if 'model_state_dict' in checkpoint:
+            # New format: full checkpoint with training state
+            model.load_state_dict(checkpoint['model_state_dict'])
+            start_epoch = checkpoint.get('epoch', 0)
+            if config.resume_epoch is not None:
+                start_epoch = config.resume_epoch
+            best_loss = checkpoint.get('best_loss', float('inf'))
+            print(f"  Resuming from epoch {start_epoch + 1}")
+            print(f"  Best loss so far: {best_loss:.6f}")
+        else:
+            # Old format: just model weights (for inference checkpoints)
+            try:
+                model.load_state_dict(checkpoint)
+                print(f"  ⚠ Loaded model weights (old checkpoint format)")
+                print(f"  Starting from epoch 0 (no training state in checkpoint)")
+                start_epoch = 0
+                best_loss = float('inf')
+            except Exception as e:
+                print(f"  ✗ Error loading checkpoint: {e}")
+                print(f"  Starting training from scratch")
+                start_epoch = 0
+                best_loss = float('inf')
     elif checkpoint_path:
         print(f"⚠ Warning: Resume checkpoint not found: {checkpoint_path}")
         print("  Starting training from scratch")
@@ -609,9 +621,13 @@ def train_multitask_model(
     # Optimizer
     optimizer = optim.Adam(model.parameters(), lr=config.learning_rate)
     
-    # Resume optimizer state if resuming
-    if config.resume_from and os.path.exists(config.resume_from):
-        checkpoint = torch.load(config.resume_from, map_location=config.device)
+    # Resume optimizer state if resuming (only for new checkpoint format)
+    checkpoint_path_for_optimizer = config.resume_from
+    if checkpoint_path_for_optimizer is None and config.auto_resume and config.checkpoint_dir:
+        checkpoint_path_for_optimizer = _find_latest_checkpoint(config.checkpoint_dir)
+    
+    if checkpoint_path_for_optimizer and os.path.exists(checkpoint_path_for_optimizer):
+        checkpoint = torch.load(checkpoint_path_for_optimizer, map_location=config.device)
         if 'optimizer_state_dict' in checkpoint:
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             print(f"  Resumed optimizer state")
