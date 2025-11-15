@@ -136,95 +136,10 @@ def process_single_particle_file(
     print(f"  Normalized range: [{kymograph_noisy_norm.min():.4f}, {kymograph_noisy_norm.max():.4f}]")
     print(f"  Normalized bg percentile (10th): {np.percentile(kymograph_noisy_norm, 10):.4f}, signal percentile (99th): {np.percentile(kymograph_noisy_norm, 99):.4f}")
     
-    # Denoise (iteratively if needed)
+    # Denoise
     denoised = denoise_kymograph_chunked(
         model, kymograph_noisy_norm, device=device, chunk_size=512, overlap=64
     )
-    
-    # Check if we should run denoiser again
-    # Criteria: trigger when quality is poor or could be improved
-    noise_input, contrast_input = estimate_noise_and_contrast(kymograph_noisy_norm)
-    noise_denoised, contrast_denoised = estimate_noise_and_contrast(denoised)
-    
-    contrast_improvement = contrast_denoised / max(contrast_input, 1e-6)
-    noise_reduction = noise_denoised / max(noise_input, 1e-6)
-    
-    # Compute denormalized noise level for quality assessment
-    # Denormalize: denorm = norm * (max - min) + min + background
-    denoised_vis = denoised * (kymograph_max - kymograph_min) + kymograph_min + background_level
-    noise_denoised_abs, _ = estimate_noise_and_contrast(denoised_vis)
-    
-    # Also get noise from original input (for comparison)
-    noise_input_abs, _ = estimate_noise_and_contrast(kymograph_noisy)
-    
-    # Diagnostic: print criteria check
-    print(f"  Denoising criteria check:")
-    print(f"    Contrast improvement: {contrast_improvement:.2f}x")
-    print(f"    Noise reduction ratio: {noise_reduction:.2f}x ({noise_reduction*100:.0f}% of noise remains)")
-    print(f"    Normalized noise: {noise_denoised:.4f}")
-    print(f"    Denormalized noise: {noise_denoised_abs:.4f}")
-    print(f"    Original input noise: {noise_input_abs:.4f}")
-    
-    # Trigger iterative denoising if:
-    # 1. Contrast improvement is modest (<1.35x) OR
-    # 2. Denormalized noise is high relative to input (>0.3 * input_noise) OR  
-    # 3. Original input noise is very high (>0.8) OR
-    # 4. Contrast improved (>1.1x) but normalized noise is still high (>0.015)
-    # This should catch files 9+ where quality degrades
-    max_iterations = 2
-    iteration = 1
-    should_rerun = (contrast_improvement < 1.35 or 
-                    noise_denoised_abs > 0.3 * noise_input_abs or
-                    noise_input_abs > 0.8 or
-                    (contrast_improvement > 1.1 and noise_denoised > 0.015))
-    
-    if should_rerun:
-        reason = []
-        if contrast_improvement < 1.35:
-            reason.append(f"contrast improvement low ({contrast_improvement:.2f}x)")
-        if noise_denoised_abs > 0.3 * noise_input_abs:
-            reason.append(f"denormalized noise high relative to input ({noise_denoised_abs:.4f} > {0.3 * noise_input_abs:.4f})")
-        if noise_input_abs > 0.8:
-            reason.append(f"original input noise very high ({noise_input_abs:.4f})")
-        if contrast_improvement > 1.1 and noise_denoised > 0.015:
-            reason.append(f"contrast OK but normalized noise high ({noise_denoised:.4f})")
-        print(f"  ✓ Criteria met for iterative denoising: {', '.join(reason)}")
-    
-    while (iteration < max_iterations and should_rerun):
-        print(f"  Iteration {iteration + 1}: Contrast improved {contrast_improvement:.2f}x, but noise reduction only {noise_reduction:.2f}x")
-        print(f"    Running denoiser again...")
-        
-        # Renormalize the denoised output for another pass
-        denoised_bg = np.percentile(denoised, 10)
-        denoised_bg_sub = denoised - denoised_bg
-        denoised_sig = np.percentile(denoised_bg_sub, 99)
-        if denoised_sig > 0:
-            denoised_norm_2 = np.clip(denoised_bg_sub / denoised_sig, 0.0, 1.0)
-        else:
-            denoised_norm_2 = np.clip(denoised_bg_sub, 0.0, 1.0)
-        
-        denoised = denoise_kymograph_chunked(
-            model, denoised_norm_2, device=device, chunk_size=512, overlap=64
-        )
-        
-        # Update metrics
-        noise_denoised, contrast_denoised = estimate_noise_and_contrast(denoised)
-        contrast_improvement = contrast_denoised / max(contrast_input, 1e-6)
-        noise_reduction = noise_denoised / max(noise_input, 1e-6)
-        
-        # Recompute denormalized noise
-        denoised_vis = denoised * (kymograph_max - kymograph_min) + kymograph_min + background_level
-        noise_denoised_abs, _ = estimate_noise_and_contrast(denoised_vis)
-        
-        # Check if we should continue (same criteria)
-        should_rerun = (contrast_improvement < 1.35 or 
-                        noise_denoised_abs > 0.3 * noise_input_abs or
-                        noise_input_abs > 0.8 or
-                        (contrast_improvement > 1.1 and noise_denoised > 0.015))
-        iteration += 1
-    
-    if iteration > 1:
-        print(f"  Completed {iteration} denoising iterations")
     
     # Apply median filter to remove remaining non-Gaussian noise
     from scipy.signal import medfilt
@@ -232,6 +147,10 @@ def process_single_particle_file(
     denoised = medfilt(denoised, kernel_size=(5, 3))
     
     # Diagnostic: check denoised output
+    noise_input, contrast_input = estimate_noise_and_contrast(kymograph_noisy_norm)
+    noise_denoised, contrast_denoised = estimate_noise_and_contrast(denoised)
+    contrast_improvement = contrast_denoised / max(contrast_input, 1e-6)
+    noise_reduction = noise_denoised / max(noise_input, 1e-6)
     print(f"  Denoised stats: min={denoised.min():.4f}, max={denoised.max():.4f}, mean={denoised.mean():.4f}, std={denoised.std():.4f}")
     print(f"  Noise: {noise_input:.4f} -> {noise_denoised:.4f} ({noise_reduction:.2f}x reduction)")
     print(f"  Contrast: {contrast_input:.4f} -> {contrast_denoised:.4f} ({contrast_improvement:.2f}x improvement)")
@@ -467,101 +386,21 @@ def process_multi_particle_file(
     print(f"  Normalized range: [{kymograph_noisy_norm.min():.4f}, {kymograph_noisy_norm.max():.4f}]")
     print(f"  Normalized bg percentile (10th): {np.percentile(kymograph_noisy_norm, 10):.4f}, signal percentile (99th): {np.percentile(kymograph_noisy_norm, 99):.4f}")
     
-    # Denoise (iteratively if needed)
+    # Denoise
     denoised_norm = denoise_kymograph_chunked(
         model, kymograph_noisy_norm, device=device, chunk_size=512, overlap=64
     )
-    
-    # Check if we should run denoiser again
-    # Criteria: trigger when quality is poor or could be improved
-    noise_input, contrast_input = estimate_noise_and_contrast(kymograph_noisy_norm)
-    noise_denoised, contrast_denoised = estimate_noise_and_contrast(denoised_norm)
-    
-    contrast_improvement = contrast_denoised / max(contrast_input, 1e-6)
-    noise_reduction = noise_denoised / max(noise_input, 1e-6)
-    
-    # Compute denormalized noise level for quality assessment
-    # Denormalize: denorm = norm * (max - min) + min + background
-    denoised_vis = denoised_norm * (kymograph_max - kymograph_min) + kymograph_min + background_level
-    noise_denoised_abs, _ = estimate_noise_and_contrast(denoised_vis)
-    
-    # Also get noise from original input (for comparison)
-    noise_input_abs, _ = estimate_noise_and_contrast(kymograph_noisy)
-    
-    # Diagnostic: print criteria check
-    print(f"  Denoising criteria check:")
-    print(f"    Contrast improvement: {contrast_improvement:.2f}x")
-    print(f"    Noise reduction ratio: {noise_reduction:.2f}x ({noise_reduction*100:.0f}% of noise remains)")
-    print(f"    Normalized noise: {noise_denoised:.4f}")
-    print(f"    Denormalized noise: {noise_denoised_abs:.4f}")
-    print(f"    Original input noise: {noise_input_abs:.4f}")
-    
-    # Trigger iterative denoising if:
-    # 1. Contrast improvement is modest (<1.35x) OR
-    # 2. Denormalized noise is high relative to input (>0.3 * input_noise) OR  
-    # 3. Original input noise is very high (>0.8) OR
-    # 4. Contrast improved (>1.1x) but normalized noise is still high (>0.015)
-    # This should catch files 9+ where quality degrades
-    max_iterations = 2
-    iteration = 1
-    should_rerun = (contrast_improvement < 1.35 or 
-                    noise_denoised_abs > 0.3 * noise_input_abs or
-                    noise_input_abs > 0.8 or
-                    (contrast_improvement > 1.1 and noise_denoised > 0.015))
-    
-    if should_rerun:
-        reason = []
-        if contrast_improvement < 1.35:
-            reason.append(f"contrast improvement low ({contrast_improvement:.2f}x)")
-        if noise_denoised_abs > 0.3 * noise_input_abs:
-            reason.append(f"denormalized noise high relative to input ({noise_denoised_abs:.4f} > {0.3 * noise_input_abs:.4f})")
-        if noise_input_abs > 0.8:
-            reason.append(f"original input noise very high ({noise_input_abs:.4f})")
-        if contrast_improvement > 1.1 and noise_denoised > 0.015:
-            reason.append(f"contrast OK but normalized noise high ({noise_denoised:.4f})")
-        print(f"  ✓ Criteria met for iterative denoising: {', '.join(reason)}")
-    
-    while (iteration < max_iterations and should_rerun):
-        print(f"  Iteration {iteration + 1}: Contrast improved {contrast_improvement:.2f}x, but noise reduction only {noise_reduction:.2f}x")
-        print(f"    Running denoiser again...")
-        
-        # Renormalize the denoised output for another pass
-        denoised_bg = np.percentile(denoised_norm, 10)
-        denoised_bg_sub = denoised_norm - denoised_bg
-        denoised_sig = np.percentile(denoised_bg_sub, 99)
-        if denoised_sig > 0:
-            denoised_norm_2 = np.clip(denoised_bg_sub / denoised_sig, 0.0, 1.0)
-        else:
-            denoised_norm_2 = np.clip(denoised_bg_sub, 0.0, 1.0)
-        
-        denoised_norm = denoise_kymograph_chunked(
-            model, denoised_norm_2, device=device, chunk_size=512, overlap=64
-        )
-        
-        # Update metrics
-        noise_denoised, contrast_denoised = estimate_noise_and_contrast(denoised_norm)
-        contrast_improvement = contrast_denoised / max(contrast_input, 1e-6)
-        noise_reduction = noise_denoised / max(noise_input, 1e-6)
-        
-        # Recompute denormalized noise
-        denoised_vis = denoised_norm * (kymograph_max - kymograph_min) + kymograph_min + background_level
-        noise_denoised_abs, _ = estimate_noise_and_contrast(denoised_vis)
-        
-        # Check if we should continue (same criteria)
-        should_rerun = (contrast_improvement < 1.35 or 
-                        noise_denoised_abs > 0.3 * noise_input_abs or
-                        noise_input_abs > 0.8 or
-                        (contrast_improvement > 1.1 and noise_denoised > 0.015))
-        iteration += 1
-    
-    if iteration > 1:
-        print(f"  Completed {iteration} denoising iterations")
     
     # Apply median filter to remove remaining non-Gaussian noise
     from scipy.signal import medfilt
     print(f"  Applying median filter to remove remaining noise...")
     denoised_norm = medfilt(denoised_norm, kernel_size=(5, 3))
     
+    # Diagnostic: check denoised output
+    noise_input, contrast_input = estimate_noise_and_contrast(kymograph_noisy_norm)
+    noise_denoised, contrast_denoised = estimate_noise_and_contrast(denoised_norm)
+    contrast_improvement = contrast_denoised / max(contrast_input, 1e-6)
+    noise_reduction = noise_denoised / max(noise_input, 1e-6)
     print(f"  Noise: {noise_input:.4f} -> {noise_denoised:.4f} ({noise_reduction:.2f}x reduction)")
     print(f"  Contrast: {contrast_input:.4f} -> {contrast_denoised:.4f} ({contrast_improvement:.2f}x improvement)")
     
