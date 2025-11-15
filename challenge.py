@@ -1,0 +1,519 @@
+"""
+Hackathon Challenge Script
+
+Processes kymograph files from the Hackathon folder:
+- Single particle files: kymograph_noisy_*.npy
+- Multi-particle files: kymograph_noisy_multiple_particles_*.npy
+
+For each file, this script:
+1. Loads the noisy kymograph
+2. Denoises using the trained U-Net model
+3. Tracks particles and estimates parameters
+4. Generates diagnostic plots and saves results
+"""
+
+import os
+import glob
+import numpy as np
+from pathlib import Path
+from typing import List, Optional
+from scipy.signal import find_peaks
+
+from denoiser import load_model, _default_device
+from single_particle_unet import denoise_kymograph_chunked
+from multi_particle_unet import track_particles
+from utils import (
+    AnalysisMetrics,
+    write_joint_metrics_csv,
+    estimate_noise_and_contrast,
+)
+from helpers import estimate_diffusion_msd_fit, get_particle_radius
+
+
+def estimate_n_particles(kymograph: np.ndarray, denoised: np.ndarray) -> int:
+    """
+    Estimate the number of particles in a kymograph.
+    
+    Uses peak detection on the denoised kymograph to count distinct tracks.
+    
+    Parameters:
+    -----------
+    kymograph : np.ndarray
+        Noisy kymograph
+    denoised : np.ndarray
+        Denoised kymograph
+    
+    Returns:
+    --------
+    n_particles : int
+        Estimated number of particles (1-3)
+    """
+    # Sample a few time slices and count distinct peaks
+    time_len, width = denoised.shape
+    
+    # Sample middle frames (more stable than edges)
+    sample_frames = [time_len // 4, time_len // 2, 3 * time_len // 4]
+    peak_counts = []
+    
+    for t in sample_frames:
+        row = denoised[t]
+        # Find peaks (local maxima)
+        # Normalize row for peak detection
+        row_norm = (row - row.min()) / (row.max() - row.min() + 1e-8)
+        
+        # Find peaks with minimum height and distance
+        peaks, _ = find_peaks(
+            row_norm,
+            height=0.3,  # At least 30% of max
+            distance=max(10, width // 10),  # Minimum separation
+        )
+        peak_counts.append(len(peaks))
+    
+    # Use median count, clamp to reasonable range
+    n_est = int(np.median(peak_counts))
+    n_particles = max(1, min(3, n_est))  # Clamp to 1-3
+    
+    return n_particles
+
+
+def process_single_particle_file(
+    filepath: str,
+    model,
+    device: str,
+    output_dir: str = "challenge_results",
+) -> AnalysisMetrics:
+    """
+    Process a single-particle kymograph file.
+    
+    Parameters:
+    -----------
+    filepath : str
+        Path to the .npy file
+    model : TinyUNet
+        Trained denoising model
+    device : str
+        Device to run model on
+    output_dir : str
+        Directory to save results
+    
+    Returns:
+    --------
+    metrics : AnalysisMetrics
+        Analysis results
+    """
+    print(f"\nProcessing single-particle file: {filepath}")
+    
+    # Load kymograph
+    kymograph_noisy = np.load(filepath).astype(np.float32)
+    
+    # Normalize to [0, 1] range (model expects this)
+    kymograph_min = kymograph_noisy.min()
+    kymograph_max = kymograph_noisy.max()
+    if kymograph_max > kymograph_min:
+        kymograph_noisy_norm = (kymograph_noisy - kymograph_min) / (
+            kymograph_max - kymograph_min
+        )
+    else:
+        kymograph_noisy_norm = kymograph_noisy - kymograph_min
+    
+    # Denoise
+    denoised = denoise_kymograph_chunked(
+        model, kymograph_noisy_norm, device=device, chunk_size=512, overlap=64
+    )
+    
+    # Denormalize for analysis
+    denoised_original_scale = (
+        denoised * (kymograph_max - kymograph_min) + kymograph_min
+    )
+    
+    # Track particle
+    from helpers import find_max_subpixel
+    
+    estimated_path = []
+    for t in range(len(denoised_original_scale)):
+        row = denoised_original_scale[t]
+        pos = find_max_subpixel(row)
+        estimated_path.append(pos)
+    estimated_path = np.array(estimated_path)
+    
+    # Estimate diffusion coefficient
+    diffusion_processed = estimate_diffusion_msd_fit(estimated_path)
+    radius_processed = get_particle_radius(diffusion_processed)
+    
+    # Estimate noise and contrast
+    noise_estimate, contrast_estimate = estimate_noise_and_contrast(
+        kymograph_noisy
+    )
+    
+    # Create metrics (we don't have ground truth, so use estimates)
+    metrics = AnalysisMetrics(
+        method_label="Challenge Single",
+        particle_radius_nm=radius_processed,  # Estimated
+        diffusion_true=np.nan,  # Unknown
+        diffusion_processed=diffusion_processed,
+        radius_true=np.nan,  # Unknown
+        radius_processed=radius_processed,
+        contrast=np.nan,  # Unknown
+        noise_level=np.nan,  # Unknown
+        contrast_estimate=contrast_estimate,
+        noise_estimate=noise_estimate,
+        figure_path=f"{output_dir}/single_{Path(filepath).stem}.png",
+    )
+    
+    # Create visualization
+    import matplotlib.pyplot as plt
+    
+    os.makedirs(output_dir, exist_ok=True)
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    
+    vmin, vmax = kymograph_noisy.min(), kymograph_noisy.max()
+    
+    axes[0].imshow(
+        kymograph_noisy.T,
+        aspect="auto",
+        origin="lower",
+        vmin=vmin,
+        vmax=vmax,
+        cmap="gray",
+    )
+    axes[0].set_title("Noisy Input")
+    axes[0].set_xlabel("Time")
+    axes[0].set_ylabel("Position")
+    
+    axes[1].imshow(
+        denoised_original_scale.T,
+        aspect="auto",
+        origin="lower",
+        vmin=vmin,
+        vmax=vmax,
+        cmap="gray",
+    )
+    axes[1].plot(estimated_path, color="red", lw=1.5, alpha=0.8, label="Track")
+    axes[1].set_title(f"Denoised & Tracked\nD={diffusion_processed:.4f} μm²/s")
+    axes[1].set_xlabel("Time")
+    axes[1].set_ylabel("Position")
+    axes[1].legend()
+    
+    axes[2].plot(estimated_path, color="blue", lw=1.0)
+    axes[2].set_title("Estimated Trajectory")
+    axes[2].set_xlabel("Time")
+    axes[2].set_ylabel("Position")
+    axes[2].grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(metrics.figure_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    
+    print(f"  ✓ Diffusion: {diffusion_processed:.4f} μm²/s")
+    print(f"  ✓ Radius: {radius_processed:.2f} nm")
+    print(f"  ✓ Contrast: {contrast_estimate:.3f}")
+    print(f"  ✓ Noise: {noise_estimate:.3f}")
+    print(f"  ✓ Figure saved: {metrics.figure_path}")
+    
+    return metrics
+
+
+def process_multi_particle_file(
+    filepath: str,
+    model,
+    device: str,
+    n_particles: Optional[int] = None,
+    output_dir: str = "challenge_results",
+) -> List[AnalysisMetrics]:
+    """
+    Process a multi-particle kymograph file.
+    
+    Parameters:
+    -----------
+    filepath : str
+        Path to the .npy file
+    model : TinyUNet
+        Trained denoising model
+    device : str
+        Device to run model on
+    n_particles : int, optional
+        Number of particles (if None, will be estimated)
+    output_dir : str
+        Directory to save results
+    
+    Returns:
+    --------
+    metrics_list : List[AnalysisMetrics]
+        Analysis results (one per particle)
+    """
+    print(f"\nProcessing multi-particle file: {filepath}")
+    
+    # Load kymograph
+    kymograph_noisy = np.load(filepath).astype(np.float32)
+    
+    # Normalize to [0, 1] range
+    kymograph_min = kymograph_noisy.min()
+    kymograph_max = kymograph_noisy.max()
+    if kymograph_max > kymograph_min:
+        kymograph_noisy_norm = (kymograph_noisy - kymograph_min) / (
+            kymograph_max - kymograph_min
+        )
+    else:
+        kymograph_noisy_norm = kymograph_noisy - kymograph_min
+    
+    # Denoise
+    denoised_norm = denoise_kymograph_chunked(
+        model, kymograph_noisy_norm, device=device, chunk_size=512, overlap=64
+    )
+    
+    # Denormalize for analysis
+    denoised = denoised_norm * (kymograph_max - kymograph_min) + kymograph_min
+    
+    # Estimate number of particles if not provided
+    if n_particles is None:
+        n_particles = estimate_n_particles(kymograph_noisy, denoised)
+        print(f"  Estimated {n_particles} particles")
+    
+    # Track particles
+    estimated_tracks = track_particles(
+        denoised,
+        n_particles=n_particles,
+        max_candidates=30,
+        max_jump=15,
+        detect_crossings=True,
+        crossing_threshold=5.0,
+        crossing_padding=2,
+    )
+    
+    # Estimate noise and contrast (global)
+    noise_estimate_global, contrast_estimate_global = estimate_noise_and_contrast(
+        kymograph_noisy
+    )
+    
+    # Analyze each track
+    metrics_list = []
+    for track_id in range(n_particles):
+        track = estimated_tracks[track_id]
+        
+        # Skip if track is all NaN
+        if np.all(np.isnan(track)):
+            print(f"  ⚠ Track {track_id + 1}: All NaN, skipping")
+            continue
+        
+        # Estimate diffusion coefficient
+        diffusion_processed = estimate_diffusion_msd_fit(track)
+        radius_processed = get_particle_radius(diffusion_processed)
+        
+        # Estimate per-track contrast from denoised kymograph
+        valid_mask = ~np.isnan(track)
+        if np.sum(valid_mask) > 10:
+            track_positions = track[valid_mask].astype(int)
+            track_positions = np.clip(track_positions, 0, denoised.shape[1] - 1)
+            
+            intensities = []
+            for t in range(len(track)):
+                if not np.isnan(track[t]):
+                    pos = int(np.clip(track[t], 0, denoised.shape[1] - 1))
+                    intensities.append(denoised[t, pos])
+            
+            if len(intensities) > 0:
+                peak_intensity = np.percentile(intensities, 90)
+                background = np.median(denoised)
+                contrast_estimate_track = peak_intensity - background
+            else:
+                contrast_estimate_track = contrast_estimate_global
+        else:
+            contrast_estimate_track = contrast_estimate_global
+        
+        # Create metrics
+        metrics = AnalysisMetrics(
+            method_label=f"Challenge Multi Track {track_id + 1}",
+            particle_radius_nm=radius_processed,
+            diffusion_true=np.nan,
+            diffusion_processed=diffusion_processed,
+            radius_true=np.nan,
+            radius_processed=radius_processed,
+            contrast=np.nan,
+            noise_level=np.nan,
+            contrast_estimate=contrast_estimate_track,
+            noise_estimate=noise_estimate_global,
+            figure_path=f"{output_dir}/multi_{Path(filepath).stem}_track{track_id + 1}.png",
+        )
+        metrics_list.append(metrics)
+        
+        print(f"  Track {track_id + 1}:")
+        print(f"    ✓ Diffusion: {diffusion_processed:.4f} μm²/s")
+        print(f"    ✓ Radius: {radius_processed:.2f} nm")
+        print(f"    ✓ Contrast: {contrast_estimate_track:.3f}")
+        valid_frames = np.sum(~np.isnan(track))
+        print(f"    ✓ Valid frames: {valid_frames}/{len(track)}")
+    
+    # Create comprehensive visualization
+    import matplotlib.pyplot as plt
+    
+    os.makedirs(output_dir, exist_ok=True)
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    
+    vmin, vmax = kymograph_noisy.min(), kymograph_noisy.max()
+    colors = ['red', 'blue', 'green', 'orange', 'purple', 'cyan']
+    
+    # Noisy input
+    axes[0, 0].imshow(
+        kymograph_noisy.T,
+        aspect="auto",
+        origin="lower",
+        vmin=vmin,
+        vmax=vmax,
+        cmap="gray",
+    )
+    axes[0, 0].set_title("Noisy Input")
+    axes[0, 0].set_xlabel("Time")
+    axes[0, 0].set_ylabel("Position")
+    
+    # Denoised with tracks
+    axes[0, 1].imshow(
+        denoised.T,
+        aspect="auto",
+        origin="lower",
+        vmin=vmin,
+        vmax=vmax,
+        cmap="gray",
+    )
+    for track_id in range(n_particles):
+        track = estimated_tracks[track_id]
+        valid_mask = ~np.isnan(track)
+        if np.sum(valid_mask) > 0:
+            color = colors[track_id % len(colors)]
+            axes[0, 1].plot(
+                track, color=color, lw=1.0, alpha=0.8, label=f"Track {track_id + 1}"
+            )
+    axes[0, 1].set_title("Denoised & Tracked")
+    axes[0, 1].set_xlabel("Time")
+    axes[0, 1].set_ylabel("Position")
+    axes[0, 1].legend(loc='upper right', fontsize=8)
+    
+    # Trajectories plot
+    for track_id in range(n_particles):
+        track = estimated_tracks[track_id]
+        valid_mask = ~np.isnan(track)
+        if np.sum(valid_mask) > 0:
+            color = colors[track_id % len(colors)]
+            axes[1, 0].plot(
+                track, color=color, lw=1.0, alpha=0.7, label=f"Track {track_id + 1}"
+            )
+    axes[1, 0].set_title("Estimated Trajectories")
+    axes[1, 0].set_xlabel("Time")
+    axes[1, 0].set_ylabel("Position")
+    axes[1, 0].legend()
+    axes[1, 0].grid(True, alpha=0.3)
+    
+    # Summary statistics
+    axes[1, 1].axis('off')
+    summary_text = f"Summary ({n_particles} particles):\n\n"
+    for i, metrics in enumerate(metrics_list):
+        summary_text += f"Track {i + 1}:\n"
+        summary_text += f"  D: {metrics.diffusion_processed:.4f} μm²/s\n"
+        summary_text += f"  R: {metrics.radius_processed:.2f} nm\n"
+        summary_text += f"  C: {metrics.contrast_estimate:.3f}\n\n"
+    summary_text += f"Global Noise: {noise_estimate_global:.3f}\n"
+    axes[1, 1].text(0.1, 0.5, summary_text, fontsize=10, verticalalignment='center',
+                    family='monospace')
+    
+    plt.tight_layout()
+    figure_path = f"{output_dir}/multi_{Path(filepath).stem}_overview.png"
+    plt.savefig(figure_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    
+    print(f"  ✓ Overview figure saved: {figure_path}")
+    
+    return metrics_list
+
+
+def run_challenge(
+    hackathon_dir: str = "Hackathon",
+    model_path: str = "models/tiny_unet_denoiser.pth",
+    output_dir: str = "challenge_results",
+    csv_path: str = "challenge_results/challenge_metrics.csv",
+):
+    """
+    Process all kymograph files in the Hackathon folder.
+    
+    Parameters:
+    -----------
+    hackathon_dir : str
+        Directory containing kymograph files
+    model_path : str
+        Path to trained model
+    output_dir : str
+        Directory to save results and figures
+    csv_path : str
+        Path to save CSV metrics
+    """
+    print("=" * 70)
+    print("HACKATHON CHALLENGE PROCESSING")
+    print("=" * 70)
+    
+    # Check model exists
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Model file not found: {model_path}")
+    
+    # Load model
+    device = _default_device()
+    print(f"\nLoading model: {model_path}")
+    print(f"Device: {device}")
+    model = load_model(model_path, device=device)
+    model.eval()
+    
+    # Create output directory
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Find all files
+    single_files = sorted(glob.glob(os.path.join(hackathon_dir, "kymograph_noisy_*.npy")))
+    multi_files = sorted(
+        glob.glob(os.path.join(hackathon_dir, "kymograph_noisy_multiple_particles_*.npy"))
+    )
+    
+    print(f"\nFound {len(single_files)} single-particle files")
+    print(f"Found {len(multi_files)} multi-particle files")
+    
+    all_metrics = []
+    
+    # Process single-particle files
+    print("\n" + "=" * 70)
+    print("PROCESSING SINGLE-PARTICLE FILES")
+    print("=" * 70)
+    for filepath in single_files:
+        try:
+            metrics = process_single_particle_file(
+                filepath, model, device, output_dir
+            )
+            all_metrics.append(metrics)
+        except Exception as e:
+            print(f"  ✗ Error processing {filepath}: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    # Process multi-particle files
+    print("\n" + "=" * 70)
+    print("PROCESSING MULTI-PARTICLE FILES")
+    print("=" * 70)
+    for filepath in multi_files:
+        try:
+            metrics_list = process_multi_particle_file(
+                filepath, model, device, n_particles=None, output_dir=output_dir
+            )
+            all_metrics.extend(metrics_list)
+        except Exception as e:
+            print(f"  ✗ Error processing {filepath}: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    # Save CSV
+    print("\n" + "=" * 70)
+    print("SAVING RESULTS")
+    print("=" * 70)
+    os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
+    written_csv = write_joint_metrics_csv(all_metrics, csv_path)
+    print(f"\n✓ Processed {len(all_metrics)} analyses")
+    print(f"✓ Metrics saved to: {written_csv}")
+    print(f"✓ Figures saved to: {output_dir}/")
+    print("\nChallenge processing complete!")
+
+
+if __name__ == "__main__":
+    run_challenge()
