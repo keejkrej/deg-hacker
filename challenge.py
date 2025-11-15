@@ -133,12 +133,27 @@ def process_single_particle_file(
     estimated_path = []
     for t in range(len(denoised_original_scale)):
         row = denoised_original_scale[t]
-        pos = find_max_subpixel(row)
-        estimated_path.append(pos)
+        # Check if row is valid (not all NaN, not all zeros)
+        if np.all(np.isnan(row)) or np.all(row == 0) or np.max(row) == np.min(row):
+            estimated_path.append(np.nan)
+        else:
+            try:
+                pos = find_max_subpixel(row)
+                if np.isnan(pos):
+                    estimated_path.append(np.nan)
+                else:
+                    estimated_path.append(pos)
+            except (ValueError, RuntimeError) as e:
+                # Fallback: use argmax if find_max_subpixel fails
+                try:
+                    max_idx = np.nanargmax(row)
+                    estimated_path.append(float(max_idx))
+                except ValueError:
+                    estimated_path.append(np.nan)
     estimated_path = np.array(estimated_path)
     
     # Check if path is valid (has variation and enough points)
-    valid_path = ~np.isnan(estimated_path) if np.any(np.isnan(estimated_path)) else np.ones_like(estimated_path, dtype=bool)
+    valid_path = ~np.isnan(estimated_path)
     if np.sum(valid_path) < 10:
         print(f"  ⚠ Warning: Too few valid points ({np.sum(valid_path)}), using NaN for diffusion")
         diffusion_processed = np.nan
