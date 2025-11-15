@@ -574,7 +574,7 @@ if __name__ == "__main__":
         denoise_loss_weight=1.0,
         segment_loss_weight=1.0,
         denoise_loss="l2",
-        segment_loss="bce",
+        segment_loss="ce",  # CrossEntropy for multi-class segmentation
         use_gradient_clipping=True,
         max_grad_norm=1.0,
         use_lr_scheduler=True,
