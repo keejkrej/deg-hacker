@@ -228,7 +228,7 @@ def process_single_particle_file(
         noise_level=np.nan,  # Unknown
         contrast_estimate=contrast_estimate,
         noise_estimate=noise_estimate,
-        figure_path=f"{output_dir}/single_{Path(filepath).stem}.png",
+        figure_path=f"{output_dir}/single_particle_{Path(filepath).stem}.png",
     )
     
     # Create visualization - 2x2 layout for better diagnosis
@@ -468,7 +468,7 @@ def process_multi_particle_file(
             noise_level=np.nan,
             contrast_estimate=contrast_estimate_track,
             noise_estimate=noise_estimate_global,
-            figure_path=f"{output_dir}/multi_{Path(filepath).stem}_track{track_id + 1}.png",
+            figure_path=f"{output_dir}/multi_particle_{Path(filepath).stem}_track{track_id + 1}.png",
         )
         metrics_list.append(metrics)
         
@@ -485,7 +485,11 @@ def process_multi_particle_file(
     os.makedirs(output_dir, exist_ok=True)
     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
     
-    vmin, vmax = kymograph_noisy.min(), kymograph_noisy.max()
+    # Use percentile-based ranges to be robust to outliers
+    vmin_noisy = np.percentile(kymograph_noisy, 1)
+    vmax_noisy = np.percentile(kymograph_noisy, 99)
+    vmin_denoised = np.percentile(denoised, 1)
+    vmax_denoised = np.percentile(denoised, 99)
     colors = ['red', 'blue', 'green', 'orange', 'purple', 'cyan']
     
     # Noisy input
@@ -493,21 +497,21 @@ def process_multi_particle_file(
         kymograph_noisy.T,
         aspect="auto",
         origin="lower",
-        vmin=vmin,
-        vmax=vmax,
+        vmin=vmin_noisy,
+        vmax=vmax_noisy,
         cmap="gray",
     )
     axes[0, 0].set_title("Noisy Input")
     axes[0, 0].set_xlabel("Time")
     axes[0, 0].set_ylabel("Position")
     
-    # Denoised with tracks
+    # Denoised with tracks (use denoised range for better contrast)
     axes[0, 1].imshow(
         denoised.T,
         aspect="auto",
         origin="lower",
-        vmin=vmin,
-        vmax=vmax,
+        vmin=vmin_denoised,
+        vmax=vmax_denoised,
         cmap="gray",
     )
     for track_id in range(n_particles):
