@@ -24,7 +24,7 @@ from train.multitask_model import (
     denoise_and_segment_chunked,
     _default_device,
 )
-from helpers import get_diffusion_coefficient
+from utils.helpers import get_diffusion_coefficient
 
 
 def visualize_training_example(

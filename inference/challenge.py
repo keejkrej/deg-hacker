@@ -235,7 +235,7 @@ def process_single_particle_file(
     
     # Track on normalized denoised (should be in [0,1] range)
     # The model outputs normalized values, tracking should work on these
-    from helpers import find_max_subpixel
+    from utils.helpers import find_max_subpixel
     
     try:
         # find_max_subpixel expects 2D array and processes each row

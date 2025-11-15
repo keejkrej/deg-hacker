@@ -43,7 +43,7 @@ metrics = analyze_particle(p=5.0, c=0.7, n=0.3)
 ### Multi-Particle Analysis
 
 ```python
-from multi_particle_unet import analyze_multi_particle
+from utils.tracking import analyze_multi_particle
 
 # Analyze 2 particles
 metrics = analyze_multi_particle(
@@ -110,7 +110,7 @@ deg-hacker/
 ### Run Parameter Grid Analysis
 
 ```python
-from multi_particle_unet import run_parameter_grid
+from utils.tracking import run_parameter_grid
 
 # Test multiple configurations
 run_parameter_grid(

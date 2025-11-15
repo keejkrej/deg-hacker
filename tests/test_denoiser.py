@@ -17,7 +17,7 @@ from denoiser import (
     SyntheticKymographDataset,
     _default_device,
 )
-from helpers import generate_kymograph, get_diffusion_coefficient
+from utils.helpers import generate_kymograph, get_diffusion_coefficient
 from utils import simulate_single_particle, simulate_multi_particle
 
 
