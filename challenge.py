@@ -7,7 +7,7 @@ Processes kymograph files from the Hackathon folder:
 
 For each file, this script:
 1. Loads the noisy kymograph
-2. Denoises using the trained U-Net model
+2. Denoises and segments using the trained multi-task U-Net model
 3. Tracks particles and estimates parameters
 4. Generates diagnostic plots and saves results
 """
@@ -20,8 +20,7 @@ from pathlib import Path
 from typing import List, Optional
 from scipy.signal import find_peaks
 
-from denoiser import load_model, _default_device
-from single_particle_unet import denoise_kymograph_chunked
+from multitask_model import load_multitask_model, denoise_and_segment_chunked, _default_device
 from multi_particle_unet import track_particles
 from utils import (
     AnalysisMetrics,
@@ -90,8 +89,8 @@ def process_single_particle_file(
     -----------
     filepath : str
         Path to the .npy file
-    model : TinyUNet
-        Trained denoising model
+    model : MultiTaskUNet
+        Trained multi-task model (denoising + segmentation)
     device : str
         Device to run model on
     output_dir : str
@@ -136,8 +135,8 @@ def process_single_particle_file(
     print(f"  Normalized range: [{kymograph_noisy_norm.min():.4f}, {kymograph_noisy_norm.max():.4f}]")
     print(f"  Normalized bg percentile (10th): {np.percentile(kymograph_noisy_norm, 10):.4f}, signal percentile (99th): {np.percentile(kymograph_noisy_norm, 99):.4f}")
     
-    # Denoise
-    denoised = denoise_kymograph_chunked(
+    # Denoise and segment using multi-task model
+    denoised, segmentation_mask = denoise_and_segment_chunked(
         model, kymograph_noisy_norm, device=device, chunk_size=512, overlap=64
     )
     
@@ -347,8 +346,8 @@ def process_multi_particle_file(
     -----------
     filepath : str
         Path to the .npy file
-    model : TinyUNet
-        Trained denoising model
+    model : MultiTaskUNet
+        Trained multi-task model (denoising + segmentation)
     device : str
         Device to run model on
     n_particles : int, optional
@@ -395,8 +394,8 @@ def process_multi_particle_file(
     print(f"  Normalized range: [{kymograph_noisy_norm.min():.4f}, {kymograph_noisy_norm.max():.4f}]")
     print(f"  Normalized bg percentile (10th): {np.percentile(kymograph_noisy_norm, 10):.4f}, signal percentile (99th): {np.percentile(kymograph_noisy_norm, 99):.4f}")
     
-    # Denoise
-    denoised_norm = denoise_kymograph_chunked(
+    # Denoise and segment using multi-task model
+    denoised_norm, segmentation_mask_norm = denoise_and_segment_chunked(
         model, kymograph_noisy_norm, device=device, chunk_size=512, overlap=64
     )
     
@@ -481,7 +480,7 @@ def process_multi_particle_file(
             else:
                 denoised_norm_2 = np.clip(denoised_bg_sub, 0.0, 1.0)
             
-            denoised_norm = denoise_kymograph_chunked(
+            denoised_norm, _ = denoise_and_segment_chunked(
                 model, denoised_norm_2, device=device, chunk_size=512, overlap=64
             )
             denoised = denoised_norm * (kymograph_max - kymograph_min) + kymograph_min + background_level
@@ -678,7 +677,7 @@ def process_multi_particle_file(
 
 def run_challenge(
     hackathon_dir: str = "Hackathon",
-    model_path: str = "models/tiny_unet_denoiser.pth",
+    model_path: str = "models/multitask_unet.pth",
     output_dir: str = "challenge_results",
     csv_path: str = "challenge_results/challenge_metrics.csv",
 ):
@@ -708,7 +707,7 @@ def run_challenge(
     device = _default_device()
     print(f"\nLoading model: {model_path}")
     print(f"Device: {device}")
-    model = load_model(model_path, device=device)
+    model = load_multitask_model(model_path, device=device)
     model.eval()
     
     # Create output directory

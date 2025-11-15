@@ -23,7 +23,19 @@ import matplotlib.pyplot as plt
 
 from utils import simulate_single_particle, simulate_multi_particle
 from helpers import generate_kymograph, get_diffusion_coefficient
-from denoiser import ConvBlock, _default_device
+from denoiser import ConvBlock
+
+
+def _default_device() -> str:
+    """Get default device for PyTorch."""
+    import torch
+    has_mps = getattr(torch.backends, "mps", None)
+    if has_mps and torch.backends.mps.is_available():
+        return "mps"
+    elif torch.cuda.is_available():
+        return "cuda"
+    else:
+        return "cpu"
 
 
 class MultiTaskUNet(nn.Module):
