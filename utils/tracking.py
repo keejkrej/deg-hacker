@@ -15,8 +15,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 from scipy.ndimage import label, center_of_mass
-from sklearn.cluster import DBSCAN
+from scipy.ndimage import label as connected_components_label
 from skimage.filters import threshold_otsu
+from scipy.ndimage import gaussian_filter
 
 import sys
 from pathlib import Path
@@ -29,6 +30,198 @@ from utils.analysis import (
     write_joint_metrics_csv,
     estimate_noise_and_contrast,
 )
+
+
+def cluster_embeddings_to_instances(embeddings, eps=0.5, min_samples=10,
+                                    smooth_sigma=0.5, min_cluster_size=20):
+    """
+    Fast embedding clustering using threshold + connected components (O(N) complexity).
+    
+    Much faster than DBSCAN/Mean Shift - uses local distance thresholding and 
+    connected components. Memory efficient and fast.
+    
+    Parameters:
+    -----------
+    embeddings : np.ndarray
+        Embeddings [H, W, D] or [T, H, W, D] for temporal clustering
+    eps : float
+        Distance threshold for similar embeddings (embedding space)
+    min_samples : int
+        Unused (kept for compatibility)
+    smooth_sigma : float
+        Gaussian blur sigma for smoothing embeddings before clustering (0 = disabled)
+    min_cluster_size : int
+        Minimum pixels per cluster (filters small noisy regions)
+    
+    Returns:
+    --------
+    labels : np.ndarray
+        Instance labels [H, W] or [T, H, W] with values 0=background, 1..N=instances
+    """
+    # Handle temporal (3D) case
+    if embeddings.ndim == 4:
+        T, H, W, D = embeddings.shape
+        
+        # Smooth embeddings (reduces noise)
+        if smooth_sigma > 0:
+            embeddings = gaussian_filter(embeddings, sigma=(0, smooth_sigma, smooth_sigma, 0))
+        
+        # Fast threshold + connected components approach (O(N) complexity)
+        # Compare each pixel to its spatial neighbors, threshold by distance
+        labels = np.zeros((T, H, W), dtype=np.int32)
+        binary_mask = np.zeros((T, H, W), dtype=bool)
+        
+        # Build binary mask: pixels with similar embeddings to neighbors
+        for t in range(T):
+            for h in range(H):
+                for w in range(W):
+                    center_emb = embeddings[t, h, w]
+                    
+                    # Check 26-connected neighbors (3D: time + space)
+                    for dt in [-1, 0, 1]:
+                        for dh in [-1, 0, 1]:
+                            for dw in [-1, 0, 1]:
+                                if dt == 0 and dh == 0 and dw == 0:
+                                    continue
+                                nt, nh, nw = t + dt, h + dh, w + dw
+                                if 0 <= nt < T and 0 <= nh < H and 0 <= nw < W:
+                                    neighbor_emb = embeddings[nt, nh, nw]
+                                    dist = np.linalg.norm(center_emb - neighbor_emb)
+                                    if dist < eps:
+                                        binary_mask[t, h, w] = True
+                                        break
+                            if binary_mask[t, h, w]:
+                                break
+                        if binary_mask[t, h, w]:
+                            break
+        
+        # Connected components on binary mask (3D)
+        structure = np.ones((3, 3, 3), dtype=bool)  # 26-connected in 3D
+        labeled_mask, num_features = connected_components_label(binary_mask, structure=structure)
+        
+        # Filter small clusters
+        filtered_labels = np.zeros_like(labeled_mask)
+        instance_id = 1
+        
+        for label_id in range(1, num_features + 1):
+            cluster_mask = (labeled_mask == label_id)
+            cluster_size = np.sum(cluster_mask)
+            
+            if cluster_size >= min_cluster_size:
+                filtered_labels[cluster_mask] = instance_id
+                instance_id += 1
+        
+        return filtered_labels.astype(np.int32)
+    
+    # Handle 2D case
+    else:
+        H, W, D = embeddings.shape
+        
+        # Smooth embeddings (reduces noise)
+        if smooth_sigma > 0:
+            embeddings = gaussian_filter(embeddings, sigma=(smooth_sigma, smooth_sigma, 0))
+        
+        # Fast threshold + connected components approach (O(N) complexity)
+        # Use connected components on thresholded distance graph
+        labels = np.zeros((H, W), dtype=np.int32)
+        
+        # Build binary mask: pixels with similar embeddings to neighbors
+        # Compare each pixel to its 8-connected neighbors
+        binary_mask = np.zeros((H, W), dtype=bool)
+        
+        for h in range(H):
+            for w in range(W):
+                center_emb = embeddings[h, w]
+                
+                # Check 8-connected neighbors
+                for dh in [-1, 0, 1]:
+                    for dw in [-1, 0, 1]:
+                        if dh == 0 and dw == 0:
+                            continue
+                        nh, nw = h + dh, w + dw
+                        if 0 <= nh < H and 0 <= nw < W:
+                            neighbor_emb = embeddings[nh, nw]
+                            dist = np.linalg.norm(center_emb - neighbor_emb)
+                            if dist < eps:
+                                binary_mask[h, w] = True
+                                break
+                    if binary_mask[h, w]:
+                        break
+        
+        # Connected components on binary mask
+        structure = np.ones((3, 3), dtype=bool)  # 8-connected
+        labeled_mask, num_features = connected_components_label(binary_mask, structure=structure)
+        
+        # Filter small clusters
+        filtered_labels = np.zeros_like(labeled_mask)
+        instance_id = 1
+        
+        for label_id in range(1, num_features + 1):
+            cluster_mask = (labeled_mask == label_id)
+            cluster_size = np.sum(cluster_mask)
+            
+            if cluster_size >= min_cluster_size:
+                filtered_labels[cluster_mask] = instance_id
+                instance_id += 1
+        
+        return filtered_labels.astype(np.int32)
+
+
+def filter_small_clusters(labels, min_size=20):
+    """Remove clusters smaller than min_size pixels."""
+    unique_labels = np.unique(labels)
+    filtered_labels = np.zeros_like(labels)
+    instance_id = 1
+    
+    for label in unique_labels:
+        if label == 0:  # Background
+            continue
+        
+        cluster_mask = (labels == label)
+        cluster_size = np.sum(cluster_mask)
+        
+        if cluster_size >= min_size:
+            filtered_labels[cluster_mask] = instance_id
+            instance_id += 1
+    
+    return filtered_labels
+
+
+def smooth_instance_mask(labels, kernel_size=3):
+    """Apply morphological smoothing to instance mask."""
+    from scipy.ndimage import median_filter
+    
+    # Apply median filter to reduce noise
+    smoothed = median_filter(labels, size=kernel_size)
+    
+    return smoothed
+
+
+def fill_holes(labels, max_hole_size=10):
+    """Fill small holes in instance masks."""
+    from scipy.ndimage import binary_fill_holes
+    
+    filled_labels = labels.copy()
+    
+    unique_labels = np.unique(labels)
+    for label in unique_labels:
+        if label == 0:  # Skip background
+            continue
+        
+        # Create binary mask for this instance
+        instance_mask = (labels == label)
+        
+        # Fill holes
+        filled_mask = binary_fill_holes(instance_mask)
+        
+        # Only fill small holes (difference between filled and original)
+        holes = filled_mask & ~instance_mask
+        hole_size = np.sum(holes)
+        
+        if hole_size <= max_hole_size:
+            filled_labels[holes] = label
+    
+    return filled_labels
 
 
 @dataclass

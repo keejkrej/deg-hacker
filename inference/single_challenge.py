@@ -181,9 +181,14 @@ def process_single_particle_file(
     # Denoise and segment using multi-task model (same as visualize_training.py)
     # Model already uses denoised features in segmentation decoder + flatness loss for smoothness
     # No post-processing needed - use raw model output
+    # Use smaller chunk size to reduce memory usage
     denoised, segmentation_labels = denoise_and_segment_chunked(
-        model, kymograph_noisy_norm, device=device, chunk_size=512, overlap=64
+        model, kymograph_noisy_norm, device=device, chunk_size=256, overlap=32
     )
+    
+    # Clear GPU cache after model inference
+    if device.startswith('cuda'):
+        torch.cuda.empty_cache()
     
     # Diagnostic: check denoised output
     noise_input, contrast_input = estimate_noise_and_contrast(kymograph_noisy_norm)
@@ -200,26 +205,29 @@ def process_single_particle_file(
     segmentation_binary = (segmentation_labels > 0.5).astype(np.float32)
     
     # Compute inference losses/metrics (similar to training losses but without ground truth)
-    # Convert to torch tensors for loss computation
-    seg_logits_tensor = torch.from_numpy(segmentation_labels).unsqueeze(0).unsqueeze(0).to(device).float()
+    # Use CPU for loss computation to avoid GPU memory issues
+    seg_logits_tensor = torch.from_numpy(segmentation_labels).unsqueeze(0).unsqueeze(0).float()  # Keep on CPU
     # Convert probabilities to logits: logit = log(p / (1-p))
     eps = 1e-8
     seg_probs = torch.clamp(seg_logits_tensor, eps, 1.0 - eps)
     seg_logits = torch.log(seg_probs / (1 - seg_probs))
     
-    # Compute entropy (uncertainty metric)
+    # Compute entropy (uncertainty metric) - on CPU
     entropy_val = entropy_regularization_loss(seg_logits).item()
+    del seg_logits, seg_probs, seg_logits_tensor  # Free memory immediately
     
-    # Compute flatness (TV loss) - measures how smooth/flat the segmentation is
+    # Compute flatness (TV loss) - on CPU, process in smaller chunks if needed
+    seg_logits_tensor = torch.from_numpy(segmentation_labels).unsqueeze(0).unsqueeze(0).float()
+    seg_probs = torch.clamp(seg_logits_tensor, eps, 1.0 - eps)
+    seg_logits = torch.log(seg_probs / (1 - seg_probs))
     flatness_val = total_variation_loss(seg_logits, range_size=2).item()
+    del seg_logits, seg_probs, seg_logits_tensor  # Free memory immediately
     
-    # Compute reconstruction error (MSE between input and denoised)
-    # Note: This isn't a true loss without ground truth, but measures consistency
+    # Compute reconstruction error (MSE between input and denoised) - on CPU
     mse_reconstruction = np.mean((kymograph_noisy_norm - denoised) ** 2)
     
-    # Compute segmentation confidence (mean distance from 0.5)
-    seg_probs_np = segmentation_labels
-    confidence = np.mean(np.abs(seg_probs_np - 0.5))  # Higher = more confident (further from 0.5)
+    # Compute segmentation confidence (mean distance from 0.5) - on CPU
+    confidence = np.mean(np.abs(segmentation_labels - 0.5))  # Higher = more confident (further from 0.5)
     
     # Print inference metrics
     print(f"\n  === Inference Losses/Metrics ===")
@@ -228,6 +236,10 @@ def process_single_particle_file(
     print(f"  Reconstruction MSE: {mse_reconstruction:.6f} (input vs denoised)")
     print(f"  Segmentation confidence: {confidence:.4f} (higher is better, >0.3 is confident)")
     print(f"  ==================================")
+    
+    # Clear GPU cache after processing
+    if device.startswith('cuda'):
+        torch.cuda.empty_cache()
     
     # Track on denoised masked by segmentation (focus tracking on particle regions)
     denoised_masked = denoised * segmentation_binary

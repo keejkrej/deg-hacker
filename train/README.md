@@ -58,19 +58,20 @@ save_multitask_model(model, "models/multitask_unet.pth")
 
 ## Resuming Training
 
-Training automatically resumes from the latest checkpoint by default! Just set `checkpoint_dir`:
+Training can automatically resume from the latest checkpoint. Enable it by setting `auto_resume=True`:
 
 ```python
 config = MultiTaskConfig(
     epochs=20,
-    checkpoint_dir="models/checkpoints",  # Auto-resumes from latest checkpoint
+    checkpoint_dir="models/checkpoints",
+    auto_resume=True,  # Auto-resumes from latest checkpoint
     # ... other config options
 )
 
 model = train_multitask_model(config, dataset)
 ```
 
-The system will:
+When enabled, the system will:
 - **Auto-detect** the latest `checkpoint_epoch_*.pth` file (highest epoch number)
 - Fall back to `best_model.pth` if no epoch checkpoints found
 - Load model weights, optimizer, and scheduler state
@@ -86,17 +87,43 @@ config = MultiTaskConfig(
 )
 ```
 
-**Disable auto-resume:**
+Or via CLI:
+
+```bash
+python train/multitask_model.py --checkpoint models/checkpoints/checkpoint_epoch_10.pth
+```
+
+**Enable auto-resume explicitly (disabled by default):**
 ```python
 config = MultiTaskConfig(
     epochs=20,
-    auto_resume=False,  # Train from scratch even if checkpoints exist
+    auto_resume=True,  # Opt-in auto-resume from latest checkpoint
     checkpoint_dir="models/checkpoints",
     # ... other config options
 )
 ```
 
-**Note**: Checkpoints saved after this update include full training state (model, optimizer, scheduler, epoch, best_loss). Older checkpoints (model weights only) can still be loaded for inference but won't resume training state.
+Or pass `--auto-resume` when running `python train/multitask_model.py ...`.  
+Provide a directory to override the checkpoint location in one step:
+
+```bash
+python train/multitask_model.py --auto-resume models/new_checkpoints
+```
+
+**Warm start from an existing checkpoint (weights only):**
+```python
+config = MultiTaskConfig(
+    epochs=20,
+    init_weights="models/checkpoints/checkpoint_epoch_5.pth",  # Loads only model weights (ignores optimizer state)
+    checkpoint_dir="models/checkpoints",
+)
+```
+
+Or via CLI:
+
+```bash
+python train/multitask_model.py --weights models/checkpoints/checkpoint_epoch_5.pth
+```
 
 ## Configuration Options
 
@@ -122,9 +149,10 @@ config = MultiTaskConfig(
 - `use_gradient_clipping`: Enable gradient clipping (default: True)
 - `max_grad_norm`: Maximum gradient norm for clipping (default: 1.0)
 - `use_lr_scheduler`: Enable learning rate scheduling (default: True)
-- `resume_from`: Path to checkpoint file to resume training from (default: None, auto-detect if auto_resume=True)
+- `resume_from`: Path to checkpoint file to resume training from (default: None, auto-detect if `auto_resume` is enabled)
+- `init_weights`: Path to checkpoint/weights file for warm-starting without optimizer/scheduler state
 - `resume_epoch`: Epoch number to resume from (if None, inferred from checkpoint)
-- `auto_resume`: Automatically resume from latest checkpoint if available (default: True)
+- `auto_resume`: Automatically resume from latest checkpoint if available (default: False; set True or pass `--auto-resume`)
 
 ## Model Architecture
 
