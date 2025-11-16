@@ -7,7 +7,7 @@ import numpy as np
 import os
 import tempfile
 
-from utils import (
+from kymo_tracker.utils import (
     simulate_single_particle,
     simulate_multi_particle,
     summarize_analysis,
@@ -15,7 +15,7 @@ from utils import (
     AnalysisMetrics,
     MultiSimulationData,
 )
-from utils.helpers import estimate_diffusion_msd_fit, get_particle_radius
+from kymo_tracker.utils.helpers import estimate_diffusion_msd_fit, get_particle_radius
 
 
 class TestSimulation:

@@ -17,8 +17,8 @@ from denoiser import (
     SyntheticKymographDataset,
     _default_device,
 )
-from utils.helpers import generate_kymograph, get_diffusion_coefficient
-from utils import simulate_single_particle, simulate_multi_particle
+from kymo_tracker.utils.helpers import generate_kymograph, get_diffusion_coefficient
+from kymo_tracker.utils import simulate_single_particle, simulate_multi_particle
 
 
 class TestTinyUNet:

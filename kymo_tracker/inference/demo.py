@@ -1,11 +1,15 @@
 # %%
 import matplotlib.pyplot as plt
 
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from utils.helpers import find_max_subpixel, get_diffusion_coefficient, get_particle_radius, estimate_diffusion_msd_fit, \
-    generate_kymograph, find_max_subpixel, load_challenge_data, load_challenge_data_multiple_particles
+from kymo_tracker.utils.helpers import (
+    find_max_subpixel,
+    get_diffusion_coefficient,
+    get_particle_radius,
+    estimate_diffusion_msd_fit,
+    generate_kymograph,
+    load_challenge_data,
+    load_challenge_data_multiple_particles,
+)
 
 # %%
 particle_size = 5  # in nm
@@ -73,6 +77,5 @@ challenge_kymo_multi1 = load_challenge_data_multiple_particles(1)
 plt.imshow(challenge_kymo_multi1.T, cmap='gray', aspect='auto', extent=[0, challenge_kymo_multi1.shape[0]*t_step, 0, challenge_kymo_multi1.shape[1]*x_step], origin='lower')
 
 # %%
-
 
 

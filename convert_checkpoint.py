@@ -4,16 +4,14 @@ This script extracts the model weights from a checkpoint file and saves them
 in the format expected by load_multitask_model (just the state_dict).
 
 Usage:
-    python convert_checkpoint.py models/checkpoints/checkpoint_epoch_6.pth models/multitask_unet.pth
+    python convert_checkpoint.py checkpoints/checkpoint_epoch_6.pth artifacts/multitask_unet.pth
 """
 
 import sys
 import torch
 from pathlib import Path
 
-# Import the model class so pickle can deserialize it
-sys.path.insert(0, str(Path(__file__).parent))
-from train.multitask_model import MultiTaskConfig
+from kymo_tracker.training.multitask import MultiTaskConfig
 
 def convert_checkpoint_to_model(checkpoint_path: str, output_path: str):
     """Convert checkpoint file to model file."""
@@ -46,7 +44,7 @@ if __name__ == "__main__":
     if len(sys.argv) < 3:
         print("Usage: python convert_checkpoint.py <checkpoint_path> <output_path>")
         print("\nExample:")
-        print("  python convert_checkpoint.py models/checkpoints/checkpoint_epoch_6.pth models/multitask_unet.pth")
+        print("  python convert_checkpoint.py checkpoints/checkpoint_epoch_6.pth artifacts/multitask_unet.pth")
         sys.exit(1)
     
     checkpoint_path = sys.argv[1]

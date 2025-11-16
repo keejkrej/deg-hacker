@@ -5,13 +5,13 @@ Tests for multi-particle tracking functionality.
 import pytest
 import numpy as np
 
-from utils.tracking import (
+from kymo_tracker.utils.tracking import (
     track_particles,
     _select_peak_candidates,
     _assign_candidates,
     _predict_positions,
 )
-from utils import simulate_multi_particle
+from kymo_tracker.utils import simulate_multi_particle
 
 
 class TestPeakSelection:

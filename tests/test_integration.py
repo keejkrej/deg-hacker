@@ -9,7 +9,7 @@ import tempfile
 
 from denoiser import load_model, denoise_kymograph, save_model, TinyUNet
 from single_particle_unet import denoise_kymograph_chunked, analyze_particle
-from utils import (
+from kymo_tracker.utils import (
     analyze_multi_particle,
     track_particles,
     simulate_single_particle,

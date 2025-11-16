@@ -19,12 +19,10 @@ from scipy.ndimage import label as connected_components_label
 from skimage.filters import threshold_otsu
 from scipy.ndimage import gaussian_filter
 
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from train.multitask_model import load_multitask_model, _default_device, denoise_and_segment_chunked
-# Import from sibling analysis module
-from utils.analysis import (
+from kymo_tracker.training.multitask import load_multitask_model
+from kymo_tracker.utils.device import get_default_device
+from kymo_tracker.inference.predict import denoise_and_segment_chunked
+from kymo_tracker.utils.analysis import (
     simulate_multi_particle,
     AnalysisMetrics,
     write_joint_metrics_csv,
@@ -1037,7 +1035,7 @@ def analyze_multi_particle(
     noise_level,
     chunk_length=16,
     overlap=8,
-    model_path="models/tiny_unet_denoiser.pth",
+    model_path="artifacts/multitask_unet.pth",
     max_candidates=30,
     max_jump=8,
 ):
@@ -1047,7 +1045,7 @@ def analyze_multi_particle(
         noise_level=noise_level,
     )
 
-    device = _default_device()
+    device = get_default_device()
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"Model file not found: {model_path}")
     # Load multi-task model

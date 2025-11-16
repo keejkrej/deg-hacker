@@ -6,7 +6,7 @@ Baseline method using median filtering for comparison with U-Net denoising.
 
 from scipy.signal import medfilt
 
-from utils import (
+from kymo_tracker.utils import (
     estimate_noise_and_contrast,
     simulate_single_particle,
     summarize_analysis,

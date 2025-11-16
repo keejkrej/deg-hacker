@@ -5,7 +5,7 @@ Provides analysis utilities, tracking functions, helper functions, and data stru
 """
 
 # Import everything from analysis.py for backward compatibility
-from utils.analysis import (
+from kymo_tracker.utils.analysis import (
     SimulationData,
     AnalysisMetrics,
     MultiSimulationData,
@@ -19,7 +19,7 @@ from utils.analysis import (
 
 # Import tracking functions (optional - requires sklearn)
 try:
-    from utils.tracking import (
+    from kymo_tracker.utils.tracking import (
         TrackSummary,
         track_particles,
         analyze_multi_particle,
@@ -37,7 +37,7 @@ except ImportError as e:
     run_parameter_grid = None
 
 # Import helper functions (commonly used ones)
-from utils.helpers import (
+from kymo_tracker.utils.helpers import (
     find_max_subpixel,
     get_diffusion_coefficient,
     get_particle_radius,
@@ -79,3 +79,7 @@ if _tracking_available:
         "summarize_multi_particle_analysis",
         "run_parameter_grid",
     ])
+
+from kymo_tracker.utils.device import get_default_device
+
+__all__.append("get_default_device")

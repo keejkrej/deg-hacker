@@ -9,7 +9,6 @@ Processes and visualizes examples from the training dataset to:
 """
 
 import os
-import sys
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
@@ -17,15 +16,11 @@ from pathlib import Path
 from typing import Optional
 import shutil
 
-# Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from train.multitask_model import (
-    MultiTaskDataset,
-    load_multitask_model,
-    denoise_and_segment_chunked,
-    _default_device,
-)
-from utils.helpers import get_diffusion_coefficient
+from kymo_tracker.data.multitask_dataset import MultiTaskDataset
+from kymo_tracker.training.multitask import load_multitask_model
+from kymo_tracker.inference.predict import denoise_and_segment_chunked
+from kymo_tracker.utils.device import get_default_device
+from kymo_tracker.utils.helpers import get_diffusion_coefficient
 
 
 def visualize_training_example(
@@ -222,7 +217,7 @@ def visualize_training_example(
 
 
 def visualize_training_set(
-    model_path: str = "models/multitask_unet.pth",
+    model_path: str = "artifacts/multitask_unet.pth",
     n_examples: int = 2,
     output_dir: str = "figures/training_visualizations",
     dataset_length: int = 512,  # Match training dimensions
@@ -268,7 +263,7 @@ def visualize_training_set(
         raise FileNotFoundError(f"Model/weights file not found: {load_path}")
 
     # Load model
-    device = _default_device()
+    device = get_default_device()
     print(f"\nLoading model: {load_path}")
     print(f"Device: {device}")
     model = load_multitask_model(load_path, device=device, max_tracks=max_trajectories)
@@ -323,7 +318,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model_path",
         type=str,
-        default="models/multitask_unet.pth",
+        default="artifacts/multitask_unet.pth",
         help="Path to trained model",
     )
     parser.add_argument(

@@ -5,7 +5,7 @@
 
 ## Multi-Particle Tracking
 
-The multi-particle tracking system (`multi_particle_unet.py`) uses:
+The multi-particle tracking system (`kymo_tracker/models/multitask.py`) uses:
 - **Otsu binarization** for particle detection (optimal for denoised data)
 - **Connected components** to identify distinct particle blobs
 - **DBSCAN clustering** to merge nearby detections
@@ -28,3 +28,10 @@ Key features:
   the traditional peak/CoM finder on the original (or denoised) signal to extract
   trajectories. This keeps the final tracks faithful to the physical signal even
   though detection is learned.
+
+## Tooling Notes
+
+- Neural networks, datasets, and training utilities now live under `kymo_tracker/`.
+- Use the Typer CLI (`python main.py train` / `python main.py infer`) instead of the old
+  `train/multitask_model.py` script. Default checkpoints are stored outside the
+  `models/` directory (see `checkpoints/`).

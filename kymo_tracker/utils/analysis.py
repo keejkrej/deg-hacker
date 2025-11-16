@@ -16,7 +16,7 @@ from typing import Optional, Sequence
 import matplotlib.pyplot as plt
 import numpy as np
 
-from utils.helpers import (
+from kymo_tracker.utils.helpers import (
     find_max_subpixel,
     get_diffusion_coefficient,
     get_particle_radius,

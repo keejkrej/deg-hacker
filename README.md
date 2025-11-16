@@ -1,204 +1,108 @@
-# DEG-Hacker: Multi-Particle Kymograph Denoising and Tracking
+# Kymo-Tracker: Multi-Particle Kymograph Denoising and Tracking
 
-A deep learning pipeline for denoising and tracking multiple particles in kymograph data using U-Net architecture.
+A modular deep learning toolkit for denoising and tracking multiple particles in kymograph data. The project ships with a DDPM-style denoiser, an attention-based locator that predicts per-track center/width trajectories, and classical tracking utilities for physics-aligned analysis.
 
 ## Features
 
-- **U-Net Denoising**: 2D U-Net model trained to predict noise (DDPM-style) for kymograph denoising
-- **Multi-Particle Tracking**: Robust tracking of 2-3 particles simultaneously
-- **Crossing Detection**: Automatic detection and exclusion of track crossing events
-- **Parameter Estimation**: Estimates diffusion coefficient, particle radius, contrast, and noise level
-- **Comprehensive Analysis**: Generates metrics, visualizations, and CSV reports
+- **Modular package**: `kymo_tracker/` contains models, datasets, training, inference, and utilities ready for reuse.
+- **U-Net Denoising**: Lightweight DDPM-style U-Net predicts noise residuals on 512(space) × 16(time) strips.
+- **Temporal Locator**: CNN + 1D ViT head regresses per-track center/width envelopes instead of dense heatmaps.
+- **Classical Tracking**: Otsu binarization, connected components, DBSCAN clustering, and greedy assignment with overlap prevention.
+- **Comprehensive Analysis**: Utilities for diffusion/contrast/noise estimation, parameter sweeps, and visualizations.
+- **Typer CLI**: `main.py` exposes `train` and `infer` commands for repeatable experiments.
 
 ## Installation
 
-1. Clone the repository:
 ```bash
 git clone <repository-url>
-cd deg-hacker
-```
-
-2. Create and activate conda environment:
-```bash
+cd kymo-tracker
 conda create -n kymo python=3.13
 conda activate kymo
-```
-
-3. Install dependencies:
-```bash
 pip install -r requirements.txt
 ```
 
-## Quick Start
+## CLI Quick Start
 
-### Single Particle Analysis
+Train the multi-task model on synthetic data (checkpoints saved to `checkpoints/`, final weights under `artifacts/`):
 
-```python
-from single_particle_unet import analyze_particle
-
-# Analyze a single particle
-metrics = analyze_particle(p=5.0, c=0.7, n=0.3)
+```bash
+python main.py train --samples 4096 --epochs 4 --checkpoint-dir checkpoints
 ```
 
-### Multi-Particle Analysis
+Run inference on a saved kymograph (`.npy` file shaped `[time, width]`):
+
+```bash
+python main.py infer artifacts/multitask_unet.pth data/sample_kymo.npy --output-dir runs/demo
+```
+
+Outputs include `denoised.npy`, `centers.npy`, and `widths.npy` for downstream analysis.
+
+## Using the Python API
 
 ```python
-from utils.tracking import analyze_multi_particle
+from kymo_tracker.data.multitask_dataset import MultiTaskDataset
+from kymo_tracker.training.multitask import MultiTaskConfig, train_multitask_model
+from kymo_tracker.utils.tracking import analyze_multi_particle
 
-# Analyze 2 particles
+# Train programmatically
+dataset = MultiTaskDataset(n_samples=1024, window_length=16)
+config = MultiTaskConfig(epochs=6, batch_size=16, checkpoint_dir="checkpoints")
+model = train_multitask_model(config, dataset)
+
+# Classical analysis utilities remain available
 metrics = analyze_multi_particle(
     radii_nm=[5.0, 10.0],
     contrasts=[0.7, 0.5],
-    noise_level=0.3
+    noise_level=0.3,
 )
-```
-
-### Training a New Model
-
-```python
-from denoiser import train_denoiser, TrainingConfig, SyntheticKymographDataset
-
-dataset = SyntheticKymographDataset(n_samples=1000, length=512, width=512)
-config = TrainingConfig(
-    epochs=12,
-    batch_size=10,
-    lr=1e-3,
-    use_residual_connection=True,
-    use_lr_scheduler=True,
-)
-model = train_denoiser(config, dataset)
 ```
 
 ## Project Structure
 
 ```
-deg-hacker/
-├── denoiser.py              # U-Net model definition and training
-├── single_particle_unet.py     # Single-particle analysis pipeline
-├── multi_particle_unet.py   # Multi-particle tracking and analysis
-├── helpers.py               # Utility functions (do not modify)
-├── utils.py                 # Analysis utilities and data structures
-├── tests/                   # Comprehensive test suite
-├── models/                  # Trained model checkpoints
-├── figures/                 # Generated analysis figures
-├── metrics/                 # CSV metrics output
-└── requirements.txt         # Python dependencies
+kymo-tracker/
+├── kymo_tracker/
+│   ├── data/               # Datasets and target builders
+│   ├── inference/          # Prediction utilities + visualizers
+│   ├── models/             # Neural network definitions
+│   ├── training/           # Training loops + configs
+│   └── utils/              # Analysis, tracking, helper functions
+├── baseline/               # Classical baselines
+├── tests/                  # Comprehensive test suite
+├── main.py                 # Typer CLI (train / infer)
+├── requirements.txt
+└── pyproject.toml
 ```
 
 ## Key Algorithms
 
-### Denoising
-- **Architecture**: Tiny U-Net with 3 resolution levels, batch normalization
-- **Training**: DDPM-style noise prediction (predicts noise to subtract)
-- **Loss**: L2 loss on predicted vs. true noise
-- **Processing**: Chunked processing for large kymographs (>512x512)
+### Denoiser
+- **Architecture**: Tiny U-Net with three resolution levels and optional dropout.
+- **Objective**: Predict additive noise (DDPM-style) to recover denoised strips.
+- **Chunking**: `denoise_and_segment_chunked` blends overlapping windows for arbitrarily long kymographs.
 
-### Tracking
-- **Detection**: Otsu binarization + connected components + DBSCAN clustering
-- **Assignment**: Greedy assignment with explicit overlap prevention
-- **Crossing Detection**: Automatic detection and exclusion of crossing events
-- **Separation**: Minimum separation enforcement to prevent track overlaps
+### Locator
+- **Tokens**: Spatial encoder averages each column into a token; ViT layers reason over all 16 frames.
+- **Outputs**: Each track channel predicts `(center, width)` per frame (normalized), converted to pixel corridors.
+- **Classical Post-processing**: Within each corridor, traditional peak/CoM finder keeps trajectories faithful to the raw signal.
 
-### Parameter Estimation
-- **Diffusion**: MSD (Mean Squared Displacement) fitting
-- **Radius**: Stokes-Einstein equation from diffusion coefficient
-- **Contrast**: Per-track intensity analysis from denoised kymograph
-- **Noise**: Global estimation from noisy kymograph residuals
-
-## Usage Examples
-
-### Run Parameter Grid Analysis
-
-```python
-from utils.tracking import run_parameter_grid
-
-# Test multiple configurations
-run_parameter_grid(
-    particle_configs=[
-        ([2.5, 5.0], [0.8, 0.6]),  # 2 particles
-        ([5.0, 10.0, 8.0], [0.7, 0.5, 1.0]),  # 3 particles
-    ],
-    noise_levels=[0.1, 0.3, 0.5],
-    csv_path="metrics/multi_particle_unet.csv"
-)
-```
-
-### Visualize Denoising Results
-
-After training, denoising results are automatically visualized. You can also call:
-
-```python
-from denoiser import visualize_denoising_results, load_model
-
-model = load_model("models/tiny_unet_denoiser.pth")
-visualize_denoising_results(model, n_samples=3)
-```
-
-Multi-particle analysis automatically generates diagnostic plots in `figures/multi_unet/`.
+### Tracking & Analysis
+- **Detection**: Otsu thresholding + connected components + DBSCAN merging.
+- **Assignment**: Greedy mapping with explicit overlap prevention and crossing detection.
+- **Metrics**: Diffusion, radius, contrast, and noise estimations plus CSV/figure exports.
 
 ## Testing
 
-Run the comprehensive test suite:
-
 ```bash
-# Run all tests
 pytest tests/
-
-# Run specific test file
-pytest tests/test_denoiser.py -v
-
-# Run with coverage
-pytest tests/ --cov=. --cov-report=html
 ```
-
-## Configuration
-
-### Training Configuration
-
-Key parameters in `TrainingConfig`:
-- `epochs`: Number of training epochs (default: 12)
-- `batch_size`: Batch size (default: 10, adjust for VRAM)
-- `base_channels`: U-Net base channels (default: 56, affects model capacity)
-- `use_residual_connection`: Enable residual connections (default: True)
-- `use_lr_scheduler`: Enable learning rate scheduling (default: True)
-
-### Tracking Configuration
-
-Key parameters in `track_particles()`:
-- `max_jump`: Maximum allowed jump between frames (default: 15 pixels)
-- `detect_crossings`: Enable crossing detection (default: True)
-- `crossing_threshold`: Distance threshold for crossings (default: 5.0 pixels)
-- `crossing_padding`: Frames to exclude around crossings (default: 2)
-
-## Output
-
-### Metrics CSV
-Analysis results are saved to `metrics/` directory with columns:
-- `method_label`: Processing method
-- `particle_radius_nm`: True particle radius
-- `diffusion_true`, `diffusion_processed`: True and estimated diffusion
-- `radius_true`, `radius_processed`: True and estimated radius
-- `contrast`, `noise_level`: True values
-- `contrast_estimate`, `noise_estimate`: Estimated values
-- `figure_path`: Path to diagnostic figure
-
-### Figures
-Diagnostic figures saved to `figures/` showing:
-- Noisy and denoised kymographs
-- True and estimated particle tracks
-- Comparison plots
 
 ## Notes
 
-- **Do not modify `helpers.py`**: Core utility functions are maintained separately
-- **Use conda `kymo` environment**: `conda activate kymo` before running
-- **Model checkpoints**: Trained models saved in `models/` directory
-- **Crossing events**: Tracks are automatically excluded after crossing to prevent ambiguous data
+- Default checkpoints now live under `checkpoints/`; trained weights under `artifacts/` by convention.
+- Core utilities reside in `kymo_tracker/utils`; please avoid modifying helper internals in `helpers.py` unless necessary.
+- Activate the provided conda environment (`conda activate kymo`) before running CLI commands.
 
 ## Citation
 
-If you use this code, please cite appropriately.
-
-## License
-
-[Add your license here]
+If this project helps your research, please cite it appropriately.
