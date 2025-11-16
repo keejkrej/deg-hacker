@@ -957,10 +957,42 @@ def compute_background_loss(pred_embeddings: torch.Tensor, target_mask: torch.Te
     return total_bg_loss / total_bg_pixels
 
 
+def compute_instance_norm_loss(pred_embeddings: torch.Tensor, target_mask: torch.Tensor,
+                               target_norm: float = 1.0) -> torch.Tensor:
+    """Encourage foreground embeddings to maintain approximately unit norm."""
+    B, D, H, W = pred_embeddings.shape
+    device = pred_embeddings.device
+    
+    embeddings_flat = pred_embeddings.permute(0, 2, 3, 1).reshape(B, H * W, D)
+    target_flat = target_mask.reshape(B, H * W)
+    
+    total_loss = pred_embeddings.new_tensor(0.0)
+    total_pixels = 0
+    
+    for b in range(B):
+        instance_mask = target_flat[b] > 0
+        if instance_mask.sum() == 0:
+            continue
+        inst_embeddings = embeddings_flat[b, instance_mask]
+        norms = torch.norm(inst_embeddings, dim=1)
+        loss = ((norms - target_norm) ** 2).mean()
+        n_pixels = instance_mask.sum().item()
+        total_loss += loss * n_pixels
+        total_pixels += n_pixels
+    
+    if total_pixels == 0:
+        return torch.tensor(0.0, device=device, requires_grad=True)
+    
+    return total_loss / total_pixels
+
+
+
+
 def embedding_loss(pred_embeddings: torch.Tensor, target_mask: torch.Tensor,
                    var_weight: float = 1.0, sep_weight: float = 0.5, bg_weight: float = 0.5,
                    smoothness_weight: float = 0.1, reg_weight: float = 0.01,
-                   separation_margin: float = 1.0) -> torch.Tensor:
+                   separation_margin: float = 1.0,
+                   norm_weight: float = 0.2) -> torch.Tensor:
     """
     Enhanced embedding loss with smoothness regularization for noise robustness.
     
@@ -997,15 +1029,19 @@ def embedding_loss(pred_embeddings: torch.Tensor, target_mask: torch.Tensor,
     # 3. Background loss
     bg_loss = compute_background_loss(pred_embeddings, target_mask)
     
-    # 4. Smoothness loss (reduces noise)
+    # 4. Instance norm consistency (push embeddings away from background norm)
+    norm_loss = compute_instance_norm_loss(pred_embeddings, target_mask)
+    
+    # 5. Smoothness loss (reduces noise)
     smoothness_loss = compute_embedding_smoothness(pred_embeddings)
     
-    # 5. L2 regularization
+    # 6. L2 regularization
     reg_loss = (pred_embeddings ** 2).mean()
     
     total_loss = (var_weight * var_loss + 
                   sep_weight * sep_loss + 
                   bg_weight * bg_loss +
+                  norm_weight * norm_loss +
                   smoothness_weight * smoothness_loss +
                   reg_weight * reg_loss)
     
