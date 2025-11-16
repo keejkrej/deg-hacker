@@ -26,13 +26,13 @@ pip install -r requirements.txt
 Train the multi-task model on synthetic data (checkpoints saved to `checkpoints/`, final weights under `artifacts/`):
 
 ```bash
-python main.py train --samples 4096 --epochs 4 --checkpoint-dir checkpoints
+python src/main.py train --samples 4096 --epochs 4 --checkpoint-dir checkpoints
 ```
 
 Run inference on a saved kymograph (`.npy` file shaped `[time, width]`):
 
 ```bash
-python main.py infer artifacts/multitask_unet.pth data/sample_kymo.npy --output-dir runs/demo
+python src/main.py infer artifacts/multitask_unet.pth data/sample_kymo.npy --output-dir runs/demo
 ```
 
 Outputs include `denoised.npy`, `centers.npy`, and `widths.npy` for downstream analysis.
@@ -61,15 +61,16 @@ metrics = analyze_multi_particle(
 
 ```
 kymo-tracker/
-├── kymo_tracker/
-│   ├── data/               # Datasets and target builders
-│   ├── inference/          # Prediction utilities + visualizers
-│   ├── models/             # Neural network definitions
-│   ├── training/           # Training loops + configs
-│   └── utils/              # Analysis, tracking, helper functions
+├── src/
+│   ├── kymo_tracker/
+│   │   ├── data/           # Datasets and target builders
+│   │   ├── inference/      # Prediction utilities + visualizers
+│   │   ├── models/         # Neural network definitions
+│   │   ├── training/       # Training loops + configs
+│   │   └── utils/          # Analysis, tracking, helper functions
+│   └── main.py             # Typer CLI (train / infer)
 ├── baseline/               # Classical baselines
 ├── tests/                  # Comprehensive test suite
-├── main.py                 # Typer CLI (train / infer)
 ├── requirements.txt
 └── pyproject.toml
 ```

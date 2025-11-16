@@ -49,15 +49,8 @@ Repository = "https://github.com/keejkrej/kymo-tracker"
 Issues = "https://github.com/keejkrej/kymo-tracker/issues"
 
 [tool.setuptools]
-packages = [
-    "kymo_tracker",
-    "kymo_tracker.data",
-    "kymo_tracker.training",
-    "kymo_tracker.models",
-    "kymo_tracker.inference",
-    "kymo_tracker.utils",
-    "baseline",
-]
+package-dir = {"" = "src"}
+packages = ["kymo_tracker"]
 
 [tool.setuptools.package-data]
 "*" = ["*.md", "*.txt"]

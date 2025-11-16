@@ -3,7 +3,7 @@
 ## Quick Start (CLI)
 
 ```bash
-python main.py train --samples 4096 --epochs 4 --checkpoint-dir checkpoints
+python src/main.py train --samples 4096 --epochs 4 --checkpoint-dir checkpoints
 ```
 
 This command synthesizes a dataset, trains the multi-task model, stores checkpoints under `checkpoints/`, and saves the final weights to `artifacts/multitask_unet.pth`.

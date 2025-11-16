@@ -31,7 +31,7 @@ Key features:
 
 ## Tooling Notes
 
-- Neural networks, datasets, and training utilities now live under `kymo_tracker/`.
-- Use the Typer CLI (`python main.py train` / `python main.py infer`) instead of the old
+- Neural networks, datasets, and training utilities now live under `src/kymo_tracker/`.
+- Use the Typer CLI (`python src/main.py train` / `python src/main.py infer`) instead of the old
   `train/multitask_model.py` script. Default checkpoints are stored outside the
   `models/` directory (see `checkpoints/`).
