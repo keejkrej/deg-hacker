@@ -1,13 +1,13 @@
-"""Train a multi-task U-Net that outputs both denoised kymograph and locator heatmaps.
+"""Train a multi-task network that denoises and regresses particle positions.
 
 This single model performs both tasks:
 1. Denoising: Predicts noise to subtract (DDPM-style)
-2. Localization: Predicts per-particle heatmaps that highlight likely positions
+2. Localization: Predicts per-particle center/width trajectories for each frame
 
 Benefits:
 - Shared encoder learns common features
-- More efficient than two separate models
-- Better feature learning through multi-task learning while keeping tracking classical
+- Efficient joint training while keeping final tracking classical
+- Temporal self-attention reasons over the 16-frame window instead of dense heatmaps
 """
 
 from dataclasses import dataclass
@@ -22,7 +22,6 @@ import torch
 from torch import nn, optim
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
-from scipy.optimize import linear_sum_assignment
 
 # Add parent directory to path for imports (only needed if not installed as package)
 if str(Path(__file__).parent.parent) not in sys.path:
@@ -112,62 +111,82 @@ class DenoiseUNet(nn.Module):
         return self.head(d1)
 
 
-class SegmentationUNet(nn.Module):
-    """UNet that produces per-pixel heatmaps from denoised inputs."""
+class TemporalLocator(nn.Module):
+    """Lightweight temporal locator with 1D ViT-style attention."""
 
-    def __init__(self, base_channels: int = 48, use_bn: bool = True,
-                 dropout: float = 0.0, encoder_dropout: float = 0.0,
-                 decoder_dropout: float = 0.0,
-                 in_channels: int = 1,
-                 out_channels: int = 1) -> None:
+    def __init__(
+        self,
+        in_channels: int = 1,
+        spatial_channels: int = 96,
+        token_dim: int = 128,
+        num_layers: int = 2,
+        num_heads: int = 4,
+        max_tracks: int = 3,
+        max_tokens: int = 512,
+    ) -> None:
         super().__init__()
-        self.enc1 = ConvBlock(in_channels, base_channels, use_bn=use_bn, dropout=encoder_dropout)
-        self.enc2 = ConvBlock(base_channels, base_channels * 2, use_bn=use_bn, dropout=encoder_dropout)
-        self.enc3 = ConvBlock(base_channels * 2, base_channels * 4, use_bn=use_bn, dropout=encoder_dropout)
-        self.down = nn.MaxPool2d(kernel_size=(1, 2), stride=(1, 2))
-        self.bottleneck = ConvBlock(base_channels * 4, base_channels * 8, use_bn=use_bn, dropout=dropout)
-        self.up3 = nn.ConvTranspose2d(base_channels * 8, base_channels * 4, kernel_size=(1, 2), stride=(1, 2))
-        self.dec3 = ConvBlock(base_channels * 8, base_channels * 4, use_bn=use_bn, dropout=decoder_dropout)
-        self.up2 = nn.ConvTranspose2d(base_channels * 4, base_channels * 2, kernel_size=(1, 2), stride=(1, 2))
-        self.dec2 = ConvBlock(base_channels * 4, base_channels * 2, use_bn=use_bn, dropout=decoder_dropout)
-        self.up1 = nn.ConvTranspose2d(base_channels * 2, base_channels, kernel_size=(1, 2), stride=(1, 2))
-        self.dec1 = ConvBlock(base_channels * 2, base_channels, use_bn=use_bn, dropout=decoder_dropout)
-        self.heatmap_head = nn.Conv2d(base_channels, out_channels, kernel_size=1)
-        nn.init.xavier_uniform_(self.heatmap_head.weight, gain=0.1)
-        nn.init.constant_(self.heatmap_head.bias, 0.0)
+        self.max_tracks = max_tracks
+        self.spatial_encoder = nn.Sequential(
+            nn.Conv2d(in_channels, spatial_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(spatial_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(spatial_channels, spatial_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(spatial_channels),
+            nn.ReLU(inplace=True),
+        )
+        self.proj = nn.Linear(spatial_channels, token_dim)
+        self.pos_embed = nn.Parameter(torch.zeros(1, max_tokens, token_dim))
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=token_dim,
+            nhead=num_heads,
+            dim_feedforward=token_dim * 4,
+            batch_first=True,
+            activation="gelu",
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.head = nn.Linear(token_dim, max_tracks * 2)
+        nn.init.xavier_uniform_(self.head.weight, gain=0.1)
+        nn.init.constant_(self.head.bias, 0.0)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        e1 = self.enc1(x)
-        e2 = self.enc2(self.down(e1))
-        e3 = self.enc3(self.down(e2))
-        b = self.bottleneck(self.down(e3))
-
-        d3 = self.up3(b)
-        if d3.shape[2:] != e3.shape[2:]:
-            d3 = torch.nn.functional.interpolate(d3, size=e3.shape[2:], mode='bilinear', align_corners=False)
-        d3 = torch.cat([d3, e3], dim=1)
-        d3 = self.dec3(d3)
-
-        d2 = self.up2(d3)
-        if d2.shape[2:] != e2.shape[2:]:
-            d2 = torch.nn.functional.interpolate(d2, size=e2.shape[2:], mode='bilinear', align_corners=False)
-        d2 = torch.cat([d2, e2], dim=1)
-        d2 = self.dec2(d2)
-
-        d1 = self.up1(d2)
-        if d1.shape[2:] != e1.shape[2:]:
-            d1 = torch.nn.functional.interpolate(d1, size=e1.shape[2:], mode='bilinear', align_corners=False)
-        d1 = torch.cat([d1, e1], dim=1)
-        d1 = self.dec1(d1)
-
-        return self.heatmap_head(d1)
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        # x: [B, 1, T, W]
+        features = self.spatial_encoder(x)  # [B, C, T, W]
+        pooled = features.mean(dim=-1)  # Average over spatial axis -> [B, C, T]
+        tokens = pooled.permute(0, 2, 1)  # [B, T, C]
+        tokens = self.proj(tokens)
+        seq_len = tokens.size(1)
+        if seq_len > self.pos_embed.size(1):
+            raise ValueError(
+                f"TemporalLocator received sequence of length {seq_len} but "
+                f"positional embedding supports up to {self.pos_embed.size(1)}"
+            )
+        tokens = tokens + self.pos_embed[:, :seq_len]
+        encoded = self.transformer(tokens)
+        preds = self.head(encoded)  # [B, T, max_tracks*2]
+        preds = preds.view(encoded.size(0), seq_len, self.max_tracks, 2)
+        preds = preds.permute(0, 2, 3, 1)  # [B, max_tracks, 2, T]
+        center_logits = preds[:, :, 0]
+        width_logits = preds[:, :, 1]
+        centers = torch.sigmoid(center_logits)  # normalized position [0,1]
+        widths = torch.nn.functional.softplus(width_logits) + 1e-3  # positive width fraction
+        return centers, widths
 
 
 class MultiTaskUNet(nn.Module):
-    """Wrapper that couples independent denoising and heatmap U-Nets."""
+    """Wrapper that couples denoising U-Net with a temporal locator."""
 
-    def __init__(self, base_channels: int = 48, use_bn: bool = True, max_tracks: int = 3,
-                 dropout: float = 0.0, encoder_dropout: float = 0.0, decoder_dropout: float = 0.0) -> None:
+    def __init__(
+        self,
+        base_channels: int = 48,
+        use_bn: bool = True,
+        max_tracks: int = 3,
+        dropout: float = 0.0,
+        encoder_dropout: float = 0.0,
+        decoder_dropout: float = 0.0,
+        locator_token_dim: int = 128,
+        locator_layers: int = 2,
+        locator_heads: int = 4,
+    ) -> None:
         super().__init__()
         self.max_tracks = max_tracks
         self.denoiser = DenoiseUNet(
@@ -177,105 +196,71 @@ class MultiTaskUNet(nn.Module):
             encoder_dropout=encoder_dropout,
             decoder_dropout=decoder_dropout,
         )
-        self.segmenter = SegmentationUNet(
-            base_channels=base_channels,
-            use_bn=use_bn,
-            dropout=dropout,
-            encoder_dropout=encoder_dropout,
-            decoder_dropout=decoder_dropout,
+        self.locator = TemporalLocator(
             in_channels=1,
-            out_channels=max_tracks,
+            spatial_channels=base_channels * 2,
+            token_dim=locator_token_dim,
+            num_layers=locator_layers,
+            num_heads=locator_heads,
+            max_tracks=max_tracks,
+            max_tokens=512,
         )
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         predicted_noise = self.denoiser(x)
         denoised = torch.clamp(x - predicted_noise, 0.0, 1.0)
-        heatmaps = self.segmenter(denoised.detach())
-        return predicted_noise, heatmaps
+        centers, widths = self.locator(denoised.detach())
+        return predicted_noise, centers, widths
 
 
-def create_particle_heatmaps(
+def create_position_targets(
     paths: np.ndarray,
-    shape: Tuple[int, int],
-    peak_width_samples: float = 2.0,
-    max_tracks: int = 3,
-) -> np.ndarray:
-    """Create per-particle Gaussian heatmaps."""
-    length, width = shape
+    length: int,
+    width: int,
+    max_tracks: int,
+    default_width_px: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Create normalized center/width targets and validity mask."""
+
     if paths.ndim == 1:
         paths = paths.reshape(1, -1)
     n_particles, path_length = paths.shape
+    positions = np.zeros((max_tracks, length), dtype=np.float32)
+    widths = np.zeros((max_tracks, length), dtype=np.float32)
+    valid = np.zeros((max_tracks, length), dtype=np.float32)
+    spatial_denominator = max(width - 1, 1)
+    width_denominator = max(width, 1)
     n_channels = min(max_tracks, n_particles)
-    heatmaps = np.zeros((max_tracks, length, width), dtype=np.float32)
-    xs = np.arange(width, dtype=np.float32)
     for i in range(n_channels):
         for t in range(min(length, path_length)):
             pos = paths[i, t]
             if np.isnan(pos):
                 continue
-            gaussian = np.exp(-0.5 * ((xs - pos) / peak_width_samples) ** 2)
-        heatmaps[i, t] = np.maximum(heatmaps[i, t], gaussian)
-    return heatmaps
+            clamped = np.clip(pos, 0.0, width - 1.0)
+            positions[i, t] = clamped / spatial_denominator
+            widths[i, t] = default_width_px / width_denominator
+            valid[i, t] = 1.0
+    return positions, widths, valid
 
 
-def channel_separation_loss(logits: torch.Tensor) -> torch.Tensor:
-    """Penalize overlap between per-channel heatmaps."""
-    if logits.ndim != 4:
-        raise ValueError("Expected heatmap logits with shape [B, C, H, W]")
-    batch, channels, _, _ = logits.shape
-    if channels <= 1 or batch == 0:
-        return logits.new_tensor(0.0)
-    probs = torch.sigmoid(logits)
-    loss = logits.new_tensor(0.0)
-    pair_count = 0
-    for i in range(channels):
-        for j in range(i + 1, channels):
-            loss = loss + (probs[:, i] * probs[:, j]).mean()
-            pair_count += 1
-    if pair_count == 0:
-        return logits.new_tensor(0.0)
-    return loss / pair_count
-
-
-def align_heatmaps_with_hungarian(
-    pred_heatmaps: torch.Tensor, true_heatmaps: torch.Tensor, eps: float = 1e-6
+def masked_l1_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+    eps: float = 1e-6,
 ) -> torch.Tensor:
-    """Align ground-truth heatmaps to predictions via Hungarian matching."""
-    if pred_heatmaps.shape != true_heatmaps.shape:
-        raise ValueError("Predicted and true heatmaps must have same shape")
-    batch, channels, _, _ = pred_heatmaps.shape
-    if channels <= 1 or batch == 0:
-        return true_heatmaps
+    """Compute mean absolute error on valid positions only."""
 
-    with torch.no_grad():
-        matched = torch.zeros_like(true_heatmaps)
-        pred_probs = torch.sigmoid(pred_heatmaps.detach())
-        for b in range(batch):
-            cost = pred_heatmaps.new_zeros((channels, channels))
-            pred_flat = pred_probs[b].view(channels, -1)
-            gt_flat = true_heatmaps[b].view(channels, -1)
-            for i in range(channels):
-                pred_i = pred_flat[i]
-                pred_sum = pred_i.sum()
-                for j in range(channels):
-                    gt_j = gt_flat[j]
-                    gt_sum = gt_j.sum()
-                    numerator = 2.0 * torch.sum(pred_i * gt_j)
-                    denom = pred_sum + gt_sum + eps
-                    dice = numerator / denom
-                    cost[i, j] = 1.0 - dice
-            row_ind, col_ind = linear_sum_assignment(cost.detach().cpu().numpy())
-            for pred_idx, gt_idx in zip(row_ind, col_ind):
-                matched[b, pred_idx] = true_heatmaps[b, gt_idx]
-    return matched
+    masked_diff = torch.abs(pred - target) * mask
+    denom = mask.sum().clamp_min(eps)
+    return masked_diff.sum() / denom
 
 
 class MultiTaskDataset(Dataset):
-    """Dataset for multi-task training: noisy kymograph -> (noise, per-particle heatmaps).
+    """Dataset for multi-task training: noisy kymograph -> (noise, center/width targets).
 
-    When ``window_length`` is provided the dataset samples random time windows of that
-    length (e.g., 16 frames) from the full synthetic kymograph so the network trains
-    on tall spatial slices with short temporal context.
+    When ``window_length`` is provided the simulator directly generates sequences of that
+    temporal length (e.g., 16 frames) so no post-generation cropping is required.
     """
     
     def __init__(
@@ -295,7 +280,14 @@ class MultiTaskDataset(Dataset):
         mask_peak_width_samples: float = 2.0,
         window_length: Optional[int] = None,
     ) -> None:
-        self.length = length
+        # If a window length is specified, treat it as the effective generation length
+        # so trajectories are synthesized directly at the desired temporal extent.
+        if window_length is not None:
+            if window_length <= 0:
+                raise ValueError("window_length must be positive")
+            self.length = int(window_length)
+        else:
+            self.length = length
         self.width = width
         self.radii_nm = radii_nm
         self.contrast = contrast
@@ -309,12 +301,6 @@ class MultiTaskDataset(Dataset):
         self.mask_peak_width_samples = mask_peak_width_samples
         self.window_length = int(window_length) if window_length is not None else None
         self.rng = np.random.default_rng(seed)
-
-        if self.window_length is not None:
-            if self.window_length <= 0:
-                raise ValueError("window_length must be positive")
-            if self.window_length > self.length:
-                raise ValueError("window_length cannot exceed total length")
     
     def __len__(self) -> int:
         return self.n_samples
@@ -368,30 +354,25 @@ class MultiTaskDataset(Dataset):
         # Compute true noise (for denoising task)
         true_noise = noisy - gt
 
-        # Create per-particle heatmaps
+        # Create normalized center/width targets
         peak_width_samples = self.peak_width / self.dx
-        heatmaps = create_particle_heatmaps(
+        default_width = max(peak_width_samples, self.mask_peak_width_samples)
+        positions, widths, valid_mask = create_position_targets(
             paths,
-            shape=(self.length, self.width),
-            peak_width_samples=max(peak_width_samples, self.mask_peak_width_samples),
-            max_tracks=self.max_trajectories
+            length=self.length,
+            width=self.width,
+            max_tracks=self.max_trajectories,
+            default_width_px=default_width,
         )
 
-        # Optionally crop along time dimension to create shorter windows
-        if self.window_length is not None and self.window_length < self.length:
-            max_start = self.length - self.window_length
-            start_idx = int(self.rng.integers(0, max_start + 1))
-            end_idx = start_idx + self.window_length
-            noisy = noisy[start_idx:end_idx]
-            true_noise = true_noise[start_idx:end_idx]
-            heatmaps = heatmaps[:, start_idx:end_idx]
-        
         # Convert to tensors
         noisy_tensor = torch.from_numpy(noisy).unsqueeze(0).float()
         noise_tensor = torch.from_numpy(true_noise).unsqueeze(0).float()
-        heatmap_tensor = torch.from_numpy(heatmaps).float()
+        position_tensor = torch.from_numpy(positions).float()
+        width_tensor = torch.from_numpy(widths).float()
+        mask_tensor = torch.from_numpy(valid_mask).float()
         
-        return noisy_tensor, noise_tensor, heatmap_tensor
+        return noisy_tensor, noise_tensor, position_tensor, width_tensor, mask_tensor
 
 
 @dataclass
@@ -401,12 +382,10 @@ class MultiTaskConfig:
     batch_size: int = 8
     learning_rate: float = 1e-3
     denoise_loss_weight: float = 1.0  # Weight for denoising loss
-    heatmap_loss_weight: float = 2.0  # Weight for locator heatmap loss
-    channel_separation_weight: float = 0.1  # Penalize overlap across heatmap channels
-    use_hungarian_matching: bool = True  # Align GT masks with predictions per batch
+    locator_loss_weight: float = 2.0  # Weight for combined locator loss
+    locator_center_weight: float = 1.0  # Relative weight for center regression
+    locator_width_weight: float = 0.5  # Relative weight for width regression
     denoise_loss: str = "l2"  # "l2" or "l1"
-    heatmap_loss: str = "bce"  # "bce" or "mse"
-    heatmap_pos_weight: Optional[float] = None  # Optional positive weighting for BCE heatmap loss
     use_gradient_clipping: bool = True
     max_grad_norm: float = 1.0
     weight_decay: float = 1e-4  # L2 regularization (weight decay) - prevents overfitting
@@ -419,7 +398,7 @@ class MultiTaskConfig:
     checkpoint_dir: Optional[str] = None  # Directory to save checkpoints (None = don't save)
     save_best: bool = True  # Save best model based on total loss
     checkpoint_every: int = 1  # Save checkpoint every N epochs (1 = every epoch)
-    auto_balance_losses: bool = True  # Automatically rebalance denoise vs heatmap losses
+    auto_balance_losses: bool = True  # Automatically rebalance denoise vs locator losses
     balance_min_scale: float = 0.1  # Clamp for adaptive denoise weight scaling
     balance_max_scale: float = 10.0
     resume_from: Optional[str] = None  # Path to checkpoint to resume training from (None = auto-detect latest)
@@ -757,17 +736,10 @@ def train_multitask_model(
     else:
         raise ValueError(f"Unknown denoise loss: {config.denoise_loss}")
     
-    # Heatmap loss
-    if config.heatmap_loss == "bce":
-        pos_weight = None
-        if config.heatmap_pos_weight is not None:
-            pos_weight = torch.tensor(config.heatmap_pos_weight, device=config.device)
-        heatmap_criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-    elif config.heatmap_loss == "mse":
-        heatmap_criterion = nn.MSELoss()
-    else:
-        raise ValueError(f"Unknown heatmap loss: {config.heatmap_loss}")
-    print(f"  Heatmap loss: {config.heatmap_loss} (weight: {config.heatmap_loss_weight})")
+    print(
+        f"  Locator loss weights => total: {config.locator_loss_weight}, "
+        f"center: {config.locator_center_weight}, width: {config.locator_width_weight}"
+    )
     
     # Optimizer with weight decay (L2 regularization)
     optimizer = optim.Adam(
@@ -811,9 +783,10 @@ def train_multitask_model(
     print(f"  Batch size: {config.batch_size}")
     print(f"  Learning rate: {config.learning_rate}")
     print(f"  Denoise loss: {config.denoise_loss} (weight: {config.denoise_loss_weight})")
-    print(f"  Heatmap loss (weight: {config.heatmap_loss_weight})")
-    print(f"  Channel separation weight: {config.channel_separation_weight}")
-    print(f"  Hungarian matching: {config.use_hungarian_matching}")
+    print(
+        f"  Locator loss weight: {config.locator_loss_weight}"
+        f" (center={config.locator_center_weight}, width={config.locator_width_weight})"
+    )
     print(f"  Weight decay (L2): {config.weight_decay}")
     if config.encoder_dropout > 0:
         print(f"  Dropout (encoder): {config.encoder_dropout}")
@@ -837,8 +810,9 @@ def train_multitask_model(
     for epoch in range(start_epoch, config.epochs):
         epoch_start_time = time.time()
         epoch_denoise_loss = 0.0
-        epoch_heatmap_loss = 0.0
-        epoch_separation_loss = 0.0
+        epoch_locator_loss = 0.0
+        epoch_center_loss = 0.0
+        epoch_width_loss = 0.0
         epoch_total_loss = 0.0
         batch_count = 0
         
@@ -850,43 +824,43 @@ def train_multitask_model(
             unit="batch"
         )
         
-        for batch_idx, (noisy, true_noise, true_heatmaps) in pbar:
+        for batch_idx, (noisy, true_noise, target_positions, target_widths, valid_mask) in pbar:
             noisy = noisy.to(config.device)
             true_noise = true_noise.to(config.device)
-            true_heatmaps = true_heatmaps.to(config.device)  # [B, C, H, W] heatmaps
+            target_positions = target_positions.to(config.device)
+            target_widths = target_widths.to(config.device)
+            valid_mask = valid_mask.to(config.device)
             
             optimizer.zero_grad()
             
-            # Forward pass: get denoising and per-particle heatmaps
-            pred_noise, pred_heatmaps = model(noisy)
+            # Forward pass: get denoising and trajectory parameters
+            pred_noise, pred_centers, pred_widths = model(noisy)
             
             # Compute losses
             denoise_loss = denoise_criterion(pred_noise, true_noise)
             
-            # Heatmap loss
-            heatmap_targets = true_heatmaps
-            if config.use_hungarian_matching:
-                heatmap_targets = align_heatmaps_with_hungarian(pred_heatmaps, true_heatmaps)
-            heatmap_loss_val = heatmap_criterion(pred_heatmaps, heatmap_targets)
+            # Locator loss (center + width regression)
+            center_loss = masked_l1_loss(pred_centers, target_positions, valid_mask)
+            width_loss = masked_l1_loss(pred_widths, target_widths, valid_mask)
+            locator_loss_val = (
+                config.locator_center_weight * center_loss +
+                config.locator_width_weight * width_loss
+            )
             
-            # Adaptive weighting to keep heatmap loss from lagging behind
+            # Adaptive weighting to keep locator loss from lagging behind
             adaptive_denoise_weight = config.denoise_loss_weight
             if config.auto_balance_losses:
                 with torch.no_grad():
-                    ratio = (heatmap_loss_val.detach() + 1e-6) / (denoise_loss.detach() + 1e-6)
+                    ratio = (locator_loss_val.detach() + 1e-6) / (denoise_loss.detach() + 1e-6)
                     ratio = torch.clamp(
                         ratio,
                         min=config.balance_min_scale,
                         max=config.balance_max_scale,
                     )
                     adaptive_denoise_weight = adaptive_denoise_weight * ratio.item()
-            separation_loss_val = pred_heatmaps.new_tensor(0.0)
-            if config.channel_separation_weight > 0.0:
-                separation_loss_val = channel_separation_loss(pred_heatmaps)
             total_loss = (
                 adaptive_denoise_weight * denoise_loss +
-                config.heatmap_loss_weight * heatmap_loss_val +
-                config.channel_separation_weight * separation_loss_val
+                config.locator_loss_weight * locator_loss_val
             )
             
             # Backward pass
@@ -894,10 +868,10 @@ def train_multitask_model(
             
             # Optional gradient diagnostics for locator head
             if batch_idx == 0 and epoch % 2 == 0:
-                head_grad = model.segmenter.heatmap_head.weight.grad
+                head_grad = model.locator.head.weight.grad
                 if head_grad is not None:
                     grad_norm = head_grad.norm().item()
-                    print(f"\n  [Debug] Heatmap head grad norm: {grad_norm:.6f}")
+                    print(f"\n  [Debug] Locator head grad norm: {grad_norm:.6f}")
             
             # Gradient clipping
             if config.use_gradient_clipping:
@@ -906,8 +880,9 @@ def train_multitask_model(
             optimizer.step()
             
             epoch_denoise_loss += denoise_loss.item()
-            epoch_heatmap_loss += heatmap_loss_val.item()
-            epoch_separation_loss += separation_loss_val.item()
+            epoch_locator_loss += locator_loss_val.item()
+            epoch_center_loss += center_loss.item()
+            epoch_width_loss += width_loss.item()
             epoch_total_loss += total_loss.item()
             batch_count += 1
             
@@ -915,8 +890,9 @@ def train_multitask_model(
             current_lr = optimizer.param_groups[0]['lr']
             pbar.set_postfix({
                 'denoise': f'{denoise_loss.item():.4f}',
-                'heatmap': f'{heatmap_loss_val.item():.4f}',
-                'separation': f'{separation_loss_val.item():.4f}',
+                'locator': f'{locator_loss_val.item():.4f}',
+                'center': f'{center_loss.item():.4f}',
+                'width': f'{width_loss.item():.4f}',
                 'lr': f'{current_lr:.2e}',
                 'total': f'{total_loss.item():.4f}'
             })
@@ -924,16 +900,16 @@ def train_multitask_model(
         pbar.close()
         
         avg_denoise_loss = epoch_denoise_loss / batch_count
-        avg_heatmap_loss = epoch_heatmap_loss / batch_count
-        avg_separation_loss = epoch_separation_loss / batch_count
+        avg_locator_loss = epoch_locator_loss / batch_count
+        avg_center_loss = epoch_center_loss / batch_count
+        avg_width_loss = epoch_width_loss / batch_count
         avg_total_loss = epoch_total_loss / batch_count
         epoch_time = time.time() - epoch_start_time
-    
+   
         print(f"Epoch {epoch + 1}/{config.epochs} completed: "
               f"Total={avg_total_loss:.6f}, "
               f"Denoise={avg_denoise_loss:.6f}, "
-              f"Heatmap={avg_heatmap_loss:.6f}, "
-              f"Separation={avg_separation_loss:.6f}, "
+              f"Locator={avg_locator_loss:.6f} (center={avg_center_loss:.6f}, width={avg_width_loss:.6f}), "
               f"Time={epoch_time:.2f}s")
         
         # Save checkpoint if configured
@@ -1055,17 +1031,17 @@ def denoise_and_segment_chunked(
     device: str = None,
     chunk_size: int = 16,
     overlap: int = 8,
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, dict[str, np.ndarray]]:
     """Apply multi-task model to kymograph with chunking.
     
-    Returns denoised kymograph and per-particle heatmaps (no clustering).
+    Returns denoised kymograph and per-particle center/width predictions.
     
     Returns:
     --------
     denoised : np.ndarray
         Denoised kymograph, shape (time, width), dtype float32, values in [0, 1]
-    heatmaps : np.ndarray
-        Heatmaps, shape (time, width, max_tracks), dtype float32
+    track_params : dict
+        ``{"centers": array, "widths": array}`` with shapes (time, max_tracks)
     """
     if device is None:
         device = _default_device()
@@ -1077,26 +1053,30 @@ def denoise_and_segment_chunked(
     if time_len <= chunk_size:
         with torch.no_grad():
             input_tensor = torch.from_numpy(kymograph).unsqueeze(0).unsqueeze(0).float().to(device)
-            pred_noise, pred_heatmaps = model(input_tensor)
+            pred_noise, pred_centers, pred_widths = model(input_tensor)
             denoised = torch.clamp(input_tensor - pred_noise, 0.0, 1.0).squeeze().cpu().numpy()
-            
-            # Convert heatmaps: [B, C, T, W] -> [T, W, C]
-            heatmaps_np = pred_heatmaps.squeeze().permute(1, 2, 0).cpu().numpy()
+            centers_np = pred_centers.squeeze(0).cpu().numpy().transpose(1, 0)
+            widths_np = pred_widths.squeeze(0).cpu().numpy().transpose(1, 0)
+            centers_px = centers_np * (width - 1)
+            widths_px = widths_np * width
+            track_params = {
+                "centers": centers_px,
+                "widths": widths_px,
+            }
             
             # Clear GPU memory
-            del input_tensor, pred_noise, pred_heatmaps
+            del input_tensor, pred_noise, pred_centers, pred_widths
             if device.startswith('cuda'):
                 torch.cuda.empty_cache()
             
-        return denoised, heatmaps_np
+        return denoised, track_params
     
     # Process in chunks with overlap
     denoised = np.zeros((time_len, width), dtype=np.float32)
     weights = np.zeros((time_len, width), dtype=np.float32)
-    
-    # Get heatmap channel count from first chunk
-    heatmap_channels = None
-    heatmaps_all = None
+    temporal_weights = np.zeros((time_len, 1), dtype=np.float32)
+    centers_all = None
+    widths_all = None
     
     # Create window function for blending
     window = np.ones(chunk_size)
@@ -1119,52 +1099,65 @@ def denoise_and_segment_chunked(
             
             # Process chunk
             chunk_tensor = torch.from_numpy(padded_chunk).unsqueeze(0).unsqueeze(0).float().to(device)
-            pred_noise_chunk, pred_heatmaps_chunk = model(chunk_tensor)
+            pred_noise_chunk, pred_centers_chunk, pred_widths_chunk = model(chunk_tensor)
             denoised_chunk = torch.clamp(chunk_tensor - pred_noise_chunk, 0.0, 1.0).squeeze().cpu().numpy()
-            
-            # Get heatmaps: [B, C, T, W] -> [T, W, C]
-            heatmaps_chunk = pred_heatmaps_chunk.squeeze().permute(1, 2, 0).cpu().numpy()
+            centers_chunk = pred_centers_chunk.squeeze(0).cpu().numpy().transpose(1, 0)
+            widths_chunk = pred_widths_chunk.squeeze(0).cpu().numpy().transpose(1, 0)
+            centers_chunk = centers_chunk * (width - 1)
+            widths_chunk = widths_chunk * width
             
             # Clear GPU memory immediately
-            del chunk_tensor, pred_noise_chunk, pred_heatmaps_chunk
+            del chunk_tensor, pred_noise_chunk, pred_centers_chunk, pred_widths_chunk
             if device.startswith('cuda'):
                 torch.cuda.empty_cache()
             
             # Extract actual size (remove padding)
             actual_len = end - start
             denoised_chunk = denoised_chunk[:actual_len]
-            heatmaps_chunk = heatmaps_chunk[:actual_len]
+            centers_chunk = centers_chunk[:actual_len]
+            widths_chunk = widths_chunk[:actual_len]
             window_chunk = window[:actual_len]
             
-            # Initialize heatmap array
-            if heatmaps_all is None:
-                heatmap_channels = heatmaps_chunk.shape[2]
-                heatmaps_all = np.zeros((time_len, width, heatmap_channels), dtype=np.float32)
+            if centers_all is None:
+                max_tracks = centers_chunk.shape[1]
+                centers_all = np.zeros((time_len, max_tracks), dtype=np.float32)
+                widths_all = np.zeros((time_len, max_tracks), dtype=np.float32)
             
-            # Blend denoised and heatmaps with window
+            # Blend denoised output and locator predictions with window
             weight_chunk = window_chunk[:, np.newaxis]
             denoised[start:end] += denoised_chunk * weight_chunk
-            heatmaps_all[start:end] += heatmaps_chunk * weight_chunk[:, :, np.newaxis]
             weights[start:end] += weight_chunk
+            centers_all[start:end] += centers_chunk * weight_chunk
+            widths_all[start:end] += widths_chunk * weight_chunk
+            temporal_weights[start:end] += weight_chunk
             
             # Clear chunk data
-            del denoised_chunk, heatmaps_chunk
+            del denoised_chunk, centers_chunk, widths_chunk
             
             # Move to next chunk
             start += chunk_size - overlap
     
-    # Normalize denoised and heatmaps by weights
+    # Normalize denoised output and locator predictions by weights
     denoised = np.divide(denoised, weights, out=np.zeros_like(denoised), where=weights > 0)
-    weights_expanded = weights[:, :, np.newaxis]
-    heatmaps_all = np.divide(heatmaps_all, weights_expanded, 
-                              out=np.zeros_like(heatmaps_all), where=weights_expanded > 0)
-    del weights, weights_expanded
+    centers_all = np.divide(
+        centers_all,
+        temporal_weights,
+        out=np.zeros_like(centers_all),
+        where=temporal_weights > 0,
+    )
+    widths_all = np.divide(
+        widths_all,
+        temporal_weights,
+        out=np.zeros_like(widths_all),
+        where=temporal_weights > 0,
+    )
+    del weights, temporal_weights
     
     # Clear GPU cache
     if device.startswith('cuda'):
         torch.cuda.empty_cache()
     
-    return denoised, heatmaps_all
+    return denoised, {"centers": centers_all, "widths": widths_all}
 
 
 if __name__ == "__main__":
@@ -1208,7 +1201,7 @@ if __name__ == "__main__":
         window_length=16,
     )
     print(f"  Total samples: {len(dataset)}")
-    sample_noisy, _, _ = dataset[0]
+    sample_noisy, _, _, _, _ = dataset[0]
     print(
         f"  Sample tensor shape: channels={sample_noisy.shape[0]}, "
         f"time={sample_noisy.shape[1]}, space={sample_noisy.shape[2]}"
@@ -1227,10 +1220,8 @@ if __name__ == "__main__":
         batch_size=32,
         learning_rate=1.5e-3,  # Slightly reduced from 2e-3 for more stable training
         denoise_loss_weight=1.0,
-        heatmap_loss_weight=2.0,
+        locator_loss_weight=2.0,
         denoise_loss="l2",
-        heatmap_loss="bce",
-        heatmap_pos_weight=None,
         weight_decay=1e-4,  # L2 regularization to prevent overfitting
         dropout=0.1,  # Dropout in bottleneck
         encoder_dropout=0.1,  # Dropout in encoder layers (commonly used in U-Nets/DDPM)

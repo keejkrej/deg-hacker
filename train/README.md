@@ -136,19 +136,21 @@ python train/multitask_model.py --weights models/checkpoints/checkpoint_epoch_5.
 - `noise_level`: Noise level range (default: (0.1, 0.5))
 - `multi_trajectory_prob`: Probability of multi-particle examples (default: 0.3)
 - `max_trajectories`: Maximum number of tracks (default: 3)
-- `mask_peak_width_samples`: Segmentation mask width in pixels (default: 2.0)
-- `window_length`: Optional time window (in frames) cropped from each synthetic
-  example. Set this to 16 to train on 512(space) × 16(time) patches while still
-  simulating full-length sequences.
+- `mask_peak_width_samples`: Default Gaussian width (pixels) used when building
+  center/width targets for the locator head (default: 2.0)
+- `window_length`: Optional time window (in frames) used for direct synthesis.
+  When set (e.g., 16), each synthetic example is generated at that temporal
+  length so no post-generation cropping is required.
 
 ### Training Parameters (`MultiTaskConfig`)
 - `epochs`: Number of training epochs
 - `batch_size`: Batch size (reduce if GPU memory is limited)
 - `learning_rate`: Initial learning rate
 - `denoise_loss_weight`: Weight for denoising loss component
-- `segment_loss_weight`: Weight for segmentation loss component
+- `locator_loss_weight`: Weight for the combined locator regression loss
+- `locator_center_weight`: Relative weight for center regression within the locator loss
+- `locator_width_weight`: Relative weight for width regression within the locator loss
 - `denoise_loss`: "l2" (MSE) or "l1" (MAE)
-- `segment_loss`: "bce" (BinaryCrossEntropy) or "dice" (Dice loss for binary)
 - `use_gradient_clipping`: Enable gradient clipping (default: True)
 - `max_grad_norm`: Maximum gradient norm for clipping (default: 1.0)
 - `use_lr_scheduler`: Enable learning rate scheduling (default: True)
@@ -163,7 +165,7 @@ The `MultiTaskUNet` model:
 - **Base channels**: 48 (configurable via `base_channels` parameter)
 - **Output heads**:
   1. Denoising head: Predicts noise to subtract (DDPM-style)
-  2. Segmentation head: Predicts binary mask (background vs particle)
+  2. Temporal locator: Lightweight CNN + Transformer encoder that regresses per-track center/width trajectories
 
 ## Output
 
@@ -171,7 +173,7 @@ The trained model will be saved to:
 - `models/multitask_unet.pth`
 
 Training progress is printed to console showing:
-- Per-epoch losses (denoising, segmentation, total)
+- Per-epoch losses (denoising, locator, total)
 - Training time per epoch
 
 ## Tips
@@ -179,4 +181,4 @@ Training progress is printed to console showing:
 1. **GPU Memory**: If you run out of GPU memory, reduce `batch_size` or `length`/`width`
 2. **Training Time**: Larger datasets (`n_samples`) and longer kymographs take more time
 3. **Multi-particle**: Increase `multi_trajectory_prob` to train more on multi-particle cases
-4. **Loss Balancing**: Adjust `denoise_loss_weight` and `segment_loss_weight` to balance tasks
+4. **Loss Balancing**: Adjust `denoise_loss_weight`, `locator_loss_weight`, and the per-component locator weights to balance tasks

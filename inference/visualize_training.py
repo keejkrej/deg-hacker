@@ -3,9 +3,9 @@ Visualize Training Set Examples
 
 Processes and visualizes examples from the training dataset to:
 1. Show model performance on training data
-2. Visualize denoising and locator heatmap outputs
+2. Visualize denoising and locator trajectory outputs
 3. Compare ground truth vs predictions
-4. Display per-particle heatmaps for different tracks
+4. Display per-particle center/width overlays for different tracks
 """
 
 import os
@@ -52,32 +52,38 @@ def visualize_training_example(
     output_dir : str
         Directory to save figures
     show_segmentation_labels : bool
-        Whether to overlay ground-truth heatmap contours
+        Whether to overlay ground-truth trajectory markers
     """
     # Get training example
-    noisy_tensor, noise_tensor, heatmap_tensor = dataset[index]
+    noisy_tensor, noise_tensor, pos_tensor, width_tensor, mask_tensor = dataset[index]
     noisy = noisy_tensor.squeeze().numpy()
     true_noise = noise_tensor.squeeze().numpy()
-    true_heatmaps = heatmap_tensor.numpy()
+    gt_positions = pos_tensor.numpy()
+    gt_widths = width_tensor.numpy()
+    gt_mask = mask_tensor.numpy().astype(bool)
 
     # Get ground truth denoised
     gt_denoised = noisy - true_noise
     time_len, space_len = noisy.shape
     display_aspect = time_len / max(space_len, 1)
+    gt_positions_px = gt_positions * max(space_len - 1, 1)
+    gt_widths_px = gt_widths * max(space_len, 1)
 
     # Run inference
     model.eval()
     with torch.no_grad():
-        # For 512x512, no chunking needed (fits in one chunk)
-        denoised, heatmaps = denoise_and_segment_chunked(
+        denoised, track_params = denoise_and_segment_chunked(
             model, noisy, device=device, chunk_size=16, overlap=8
         )
-    heatmap_probs = 1.0 / (1.0 + np.exp(-heatmaps))
+    pred_centers = track_params["centers"]
+    pred_widths = track_params["widths"]
+    pred_centers = np.clip(pred_centers, 0.0, space_len - 1)
+    pred_widths = np.clip(pred_widths, 0.0, space_len)
 
     # Create visualization
     os.makedirs(output_dir, exist_ok=True)
-    n_tracks = true_heatmaps.shape[0]
-    n_cols = max(3, n_tracks)
+    n_tracks = gt_positions.shape[0]
+    n_cols = 3  # First row always shows [noisy, GT, denoised]
     fig, axes = plt.subplots(
         2,
         n_cols,
@@ -93,12 +99,6 @@ def visualize_training_example(
     vmax_noisy = np.percentile(noisy, 99)
     vmin_denoised = np.percentile(gt_denoised, 1)
     vmax_denoised = np.percentile(gt_denoised, 99)
-    heat_slice = heatmap_probs[:, :, :n_tracks]
-    if heat_slice.size > 0:
-        vmin_heat = np.percentile(heat_slice, 1)
-        vmax_heat = np.percentile(heat_slice, 99)
-    else:
-        vmin_heat, vmax_heat = 0.0, 1.0
 
     # Row 1: Input, Ground Truth, Denoised
     axes[0, 0].imshow(
@@ -140,44 +140,62 @@ def visualize_training_example(
     for col in range(3, n_cols):
         axes[0, col].axis("off")
 
-    # Row 2: per-track heatmaps
-    heat_im = None
-    for track_idx in range(n_tracks):
-        ax = axes[1, track_idx]
-        pred_heat = heatmap_probs[:, :, track_idx]
-        gt_heat = true_heatmaps[track_idx]
-        heat_im = ax.imshow(
-            pred_heat.T,
-            aspect=display_aspect,
-            origin="lower",
-            vmin=vmin_heat,
-            vmax=vmax_heat,
-            cmap="inferno",
-        )
-        if show_segmentation_labels:
-            levels = np.linspace(0.3, 0.9, 3)
-            ax.contour(
-                gt_heat.T,
-                levels=levels,
-                colors="cyan",
-                linewidths=0.8,
-                alpha=0.8,
-            )
-        ax.set_title(f"Particle {track_idx + 1} Heatmap")
-        ax.set_xlabel("Time")
-        ax.set_ylabel("Position")
-    if heat_im is not None:
-        cbar = fig.colorbar(
-            heat_im,
-            ax=axes[1, :n_tracks],
-            fraction=0.03,
-            pad=0.02,
-            label="Heat",
-        )
+    # Row 2: ground-truth vs predicted trajectories
+    time_axis = np.arange(time_len)
+    colors = plt.cm.tab10(np.linspace(0, 1, max(n_tracks, 1)))
 
-    # Hide extra axes in second row if any
-    for col in range(n_tracks, n_cols):
-        axes[1, col].axis("off")
+    ax_gt = axes[1, 0]
+    ax_pred = axes[1, 1]
+
+    if show_segmentation_labels:
+        ax_gt.set_title("Ground Truth Trajectories")
+        for track_idx in range(n_tracks):
+            valid_idx = gt_mask[track_idx]
+            if not valid_idx.any():
+                continue
+            color = colors[track_idx % len(colors)]
+            ax_gt.plot(
+                time_axis[valid_idx],
+                gt_positions_px[track_idx][valid_idx],
+                color=color,
+                linewidth=1.5,
+                label=f"Track {track_idx + 1}",
+            )
+            half_width = gt_widths_px[track_idx][valid_idx] * 0.5
+            ax_gt.fill_between(
+                time_axis[valid_idx],
+                np.clip(gt_positions_px[track_idx][valid_idx] - half_width, 0, space_len - 1),
+                np.clip(gt_positions_px[track_idx][valid_idx] + half_width, 0, space_len - 1),
+                color=color,
+                alpha=0.15,
+            )
+        ax_gt.set_xlabel("Time")
+        ax_gt.set_ylabel("Position")
+        if n_tracks > 0:
+            ax_gt.legend(loc="upper right")
+    else:
+        ax_gt.axis("off")
+
+    ax_pred.set_title("Predicted Trajectories")
+    for track_idx in range(n_tracks):
+        color = colors[track_idx % len(colors)]
+        pred_center = pred_centers[:, track_idx]
+        pred_half_width = pred_widths[:, track_idx] * 0.5
+        lower = np.clip(pred_center - pred_half_width, 0, space_len - 1)
+        upper = np.clip(pred_center + pred_half_width, 0, space_len - 1)
+        ax_pred.fill_between(
+            time_axis,
+            lower,
+            upper,
+            color=color,
+            alpha=0.2,
+        )
+        ax_pred.plot(time_axis, pred_center, color=color, linewidth=1.5)
+    ax_pred.set_xlabel("Time")
+    ax_pred.set_ylabel("Position")
+
+    # Hide unused subplot in second row (third column)
+    axes[1, 2].axis("off")
 
     # Save figure
     filename = f"training_example_{index:04d}.png"
@@ -192,13 +210,15 @@ def visualize_training_example(
     print(f"    Denoising MAE: {np.mean(np.abs(gt_denoised - denoised)):.4f}")
     print(f"    Denoising RMSE: {np.sqrt(np.mean((gt_denoised - denoised) ** 2)):.4f}")
 
-    # Heatmap statistics
-    print(f"    Heatmap shape: {heatmaps.shape}")
-    print(f"    Heatmap range: [{heatmaps.min():.3f}, {heatmaps.max():.3f}]")
-    print(f"    Heatmap mean: {heatmaps.mean():.3f}, std: {heatmaps.std():.3f}")
-
-    active_channels = np.sum(true_heatmaps.max(axis=(1, 2)) > 0.05)
-    print(f"    Active GT heatmaps: {active_channels}/{n_tracks}")
+    # Trajectory statistics
+    gt_positions_time = gt_positions_px.transpose(1, 0)
+    gt_mask_time = gt_mask.transpose(1, 0)
+    denom = max(gt_mask_time.sum(), 1)
+    center_mae = np.sum(np.abs(pred_centers - gt_positions_time) * gt_mask_time) / denom
+    print(f"    Predicted centers shape: {pred_centers.shape}")
+    print(f"    Center MAE (pixels): {center_mae:.3f}")
+    active_channels = np.sum(gt_mask.max(axis=1))
+    print(f"    Active GT trajectories: {active_channels}/{n_tracks}")
 
 
 def visualize_training_set(
@@ -229,7 +249,7 @@ def visualize_training_set(
     max_trajectories : int
         Maximum number of trajectories in dataset
     show_segmentation_labels : bool
-        Whether to overlay ground-truth heatmap contours
+        Whether to overlay ground-truth trajectory markers
     """
     print("=" * 70)
     print("TRAINING SET VISUALIZATION")
@@ -333,7 +353,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--no_segmentation",
         action="store_true",
-        help="Don't overlay ground-truth heatmaps",
+        help="Don't overlay ground-truth trajectories",
     )
 
     args = parser.parse_args()
