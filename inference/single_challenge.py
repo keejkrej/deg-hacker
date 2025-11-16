@@ -29,7 +29,13 @@ from scipy.signal import find_peaks
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from train.multitask_model import load_multitask_model, denoise_and_segment_chunked, _default_device
+from train.multitask_model import (
+    load_multitask_model, 
+    denoise_and_segment_chunked, 
+    _default_device,
+    entropy_regularization_loss,
+    total_variation_loss,
+)
 from utils import (
     AnalysisMetrics,
     estimate_noise_and_contrast,
@@ -135,6 +141,9 @@ def process_single_particle_file(
     """
     Process a single-particle kymograph file.
     
+    Simplified processing matching visualize_training.py - minimal preprocessing,
+    no manual post-processing to see raw model performance.
+    
     Parameters:
     -----------
     filepath : str
@@ -156,88 +165,25 @@ def process_single_particle_file(
     # Load kymograph
     kymograph_noisy = np.load(filepath).astype(np.float32)
     
-    # Challenge data format: background is gray (~0), particles are white (bright)
-    # Model expects: background ~0 (dark), particles bright
-    # Strategy: subtract background level, then normalize so background maps to 0
+    # Simple normalization to [0, 1] range (matching training data format)
+    # Use percentile-based normalization to be robust to outliers
+    vmin = np.percentile(kymograph_noisy, 1)
+    vmax = np.percentile(kymograph_noisy, 99)
     
-    # Estimate background level (use low percentile to be robust to outliers)
-    background_level = np.percentile(kymograph_noisy, 10)  # 10th percentile as background
-    
-    # Subtract background to make it ~0
-    kymograph_bg_subtracted = kymograph_noisy - background_level
-    
-    # Normalize to [0, 1] range: map background (now ~0) to 0, signal to 1
-    # Use signal level (99th percentile) as the upper bound
-    signal_level = np.percentile(kymograph_bg_subtracted, 99)  # 99th percentile as signal
-    
-    if signal_level > 0:
-        # Normalize: background (~0) -> 0, signal -> 1
-        kymograph_noisy_norm = np.clip(kymograph_bg_subtracted / signal_level, 0.0, 1.0)
+    if vmax > vmin:
+        kymograph_noisy_norm = np.clip((kymograph_noisy - vmin) / (vmax - vmin), 0.0, 1.0)
     else:
-        # Fallback if no signal
-        kymograph_noisy_norm = np.clip(kymograph_bg_subtracted, 0.0, 1.0)
+        kymograph_noisy_norm = np.clip(kymograph_noisy - vmin, 0.0, 1.0)
     
-    # Store normalization parameters for denormalization
-    kymograph_min = 0.0  # Background maps to 0
-    kymograph_max = signal_level  # Signal maps to 1
-    
-    print(f"  Background level: {background_level:.4f}, Signal level: {signal_level:.4f}")
+    print(f"  Input range: [{kymograph_noisy.min():.4f}, {kymograph_noisy.max():.4f}]")
     print(f"  Normalized range: [{kymograph_noisy_norm.min():.4f}, {kymograph_noisy_norm.max():.4f}]")
-    print(f"  Normalized bg percentile (10th): {np.percentile(kymograph_noisy_norm, 10):.4f}, signal percentile (99th): {np.percentile(kymograph_noisy_norm, 99):.4f}")
     
-    # Denoise and segment using multi-task model
+    # Denoise and segment using multi-task model (same as visualize_training.py)
+    # Model already uses denoised features in segmentation decoder + flatness loss for smoothness
+    # No post-processing needed - use raw model output
     denoised, segmentation_labels = denoise_and_segment_chunked(
         model, kymograph_noisy_norm, device=device, chunk_size=512, overlap=64
     )
-    
-    # Set edge regions to black (background) at all times to handle edge artifacts
-    # Positions 0-11 and 500-511 (if width >= 512) are set to 0
-    time_len, width = segmentation_labels.shape
-    segmentation_labels[:, 0:12] = 0.0  # Left edge: positions 0-11
-    if width >= 512:
-        segmentation_labels[:, 500:512] = 0.0  # Right edge: positions 500-511
-    elif width > 500:
-        segmentation_labels[:, 500:] = 0.0  # Right edge: positions 500 to end
-    
-    # Apply segmentation mask to suppress background noise
-    # segmentation_labels is now a binary mask (0=background, 1=particle)
-    from scipy.ndimage import binary_opening, binary_dilation
-    
-    mask_binary = (segmentation_labels > 0.7).astype(np.float32)  # Threshold at 0.7 for binary (higher = stricter)
-    
-    # Apply opening (erosion + dilation) to remove small noise
-    opening_kernel = np.ones((3, 3), dtype=bool)
-    mask_opened = binary_opening(mask_binary, structure=opening_kernel).astype(np.float32)
-    
-    # Apply opening to segmentation_labels for use in apply_segmentation_mask
-    segmentation_labels_opened = mask_opened.astype(np.float32)
-    
-    mask_dilated = (apply_segmentation_mask(
-        np.ones_like(segmentation_labels_opened), segmentation_labels_opened, dilation_size=(3, 3)
-    ) > 0.7).astype(np.float32)
-    
-    denoised = apply_segmentation_mask(
-        denoised, segmentation_labels_opened, dilation_size=(3, 3), background_weight=0.3
-    )
-    
-    print(f"  Segmentation mask: {np.sum(mask_binary > 0):.0f} pixels ({100*np.mean(mask_binary):.1f}% of image)")
-    print(f"  After opening: {np.sum(mask_opened > 0):.0f} pixels ({100*np.mean(mask_opened):.1f}% of image)")
-    print(f"  Mask value range: [{segmentation_labels.min():.3f}, {segmentation_labels.max():.3f}]")
-    print(f"  After dilation: {np.sum(mask_dilated > 0):.0f} pixels ({100*np.mean(mask_dilated):.1f}% of image)")
-    
-    # Check background noise level (std of 0-80 percentile regions, outside tracks)
-    # Only apply median filter if background noise is high
-    background_mask = denoised <= np.percentile(denoised, 80)
-    background_std = np.std(denoised[background_mask]) if np.any(background_mask) else 0.0
-    median_filter_threshold = 0.01  # Apply if background std > 0.01
-    
-    if background_std > median_filter_threshold:
-        from scipy.signal import medfilt
-        print(f"  Applying median filter (background std={background_std:.4f} > {median_filter_threshold:.4f})...")
-        # Use larger kernel for sparse noise: (9, 5) = 9 time steps, 5 spatial pixels
-        denoised = medfilt(denoised, kernel_size=(9, 5))
-    else:
-        print(f"  Skipping median filter (background std={background_std:.4f} <= {median_filter_threshold:.4f})")
     
     # Diagnostic: check denoised output
     noise_input, contrast_input = estimate_noise_and_contrast(kymograph_noisy_norm)
@@ -247,20 +193,59 @@ def process_single_particle_file(
     print(f"  Denoised stats: min={denoised.min():.4f}, max={denoised.max():.4f}, mean={denoised.mean():.4f}, std={denoised.std():.4f}")
     print(f"  Noise: {noise_input:.4f} -> {noise_denoised:.4f} ({noise_reduction:.2f}x reduction)")
     print(f"  Contrast: {contrast_input:.4f} -> {contrast_denoised:.4f} ({contrast_improvement:.2f}x improvement)")
+    print(f"  Segmentation coverage: {100*np.mean(segmentation_labels > 0.5):.1f}%")
+    print(f"  Segmentation range: [{segmentation_labels.min():.3f}, {segmentation_labels.max():.3f}]")
     
-    # Track on normalized denoised (should be in [0,1] range)
+    # Compute binary mask (thresholded from probabilities) - used for tracking and visualization
+    segmentation_binary = (segmentation_labels > 0.5).astype(np.float32)
+    
+    # Compute inference losses/metrics (similar to training losses but without ground truth)
+    # Convert to torch tensors for loss computation
+    seg_logits_tensor = torch.from_numpy(segmentation_labels).unsqueeze(0).unsqueeze(0).to(device).float()
+    # Convert probabilities to logits: logit = log(p / (1-p))
+    eps = 1e-8
+    seg_probs = torch.clamp(seg_logits_tensor, eps, 1.0 - eps)
+    seg_logits = torch.log(seg_probs / (1 - seg_probs))
+    
+    # Compute entropy (uncertainty metric)
+    entropy_val = entropy_regularization_loss(seg_logits).item()
+    
+    # Compute flatness (TV loss) - measures how smooth/flat the segmentation is
+    flatness_val = total_variation_loss(seg_logits, range_size=2).item()
+    
+    # Compute reconstruction error (MSE between input and denoised)
+    # Note: This isn't a true loss without ground truth, but measures consistency
+    mse_reconstruction = np.mean((kymograph_noisy_norm - denoised) ** 2)
+    
+    # Compute segmentation confidence (mean distance from 0.5)
+    seg_probs_np = segmentation_labels
+    confidence = np.mean(np.abs(seg_probs_np - 0.5))  # Higher = more confident (further from 0.5)
+    
+    # Print inference metrics
+    print(f"\n  === Inference Losses/Metrics ===")
+    print(f"  Entropy (uncertainty): {entropy_val:.6f} (lower is better, <0.2 is confident)")
+    print(f"  Flatness (TV loss): {flatness_val:.6f} (lower is better, <0.1 is flat)")
+    print(f"  Reconstruction MSE: {mse_reconstruction:.6f} (input vs denoised)")
+    print(f"  Segmentation confidence: {confidence:.4f} (higher is better, >0.3 is confident)")
+    print(f"  ==================================")
+    
+    # Track on denoised masked by segmentation (focus tracking on particle regions)
+    denoised_masked = denoised * segmentation_binary
+    
+    # Track on masked denoised (should be in [0,1] range)
     # The model outputs normalized values, tracking should work on these
     from utils.helpers import find_max_subpixel
     
     try:
         # find_max_subpixel expects 2D array and processes each row
-        estimated_path = find_max_subpixel(denoised)
+        # Use denoised masked by segmentation to focus on particle regions
+        estimated_path = find_max_subpixel(denoised_masked)
     except (ValueError, RuntimeError, IndexError) as e:
         # Fallback: process row by row manually
         print(f"  ⚠ Warning: find_max_subpixel failed, using manual tracking: {e}")
         estimated_path = []
-        for t in range(len(denoised)):
-            row = denoised[t]
+        for t in range(len(denoised_masked)):
+            row = denoised_masked[t]
             # Check if row is valid
             if np.all(np.isnan(row)) or np.all(row == 0) or (np.max(row) == np.min(row) and not np.isnan(row).any()):
                 estimated_path.append(np.nan)
@@ -336,63 +321,61 @@ def process_single_particle_file(
         figure_path=f"{output_dir}/single_particle_{Path(filepath).stem}.png",
     )
     
-    # Create visualization - 2x2 layout for better diagnosis
+    # Create visualization - 2x2 layout (matching visualize_training.py style)
     import matplotlib.pyplot as plt
     
     os.makedirs(output_dir, exist_ok=True)
     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
     
     # Use percentile-based ranges to be robust to outliers
-    vmin_noisy = np.percentile(kymograph_noisy, 1)
-    vmax_noisy = np.percentile(kymograph_noisy, 99)
+    vmin_noisy = np.percentile(kymograph_noisy_norm, 1)
+    vmax_noisy = np.percentile(kymograph_noisy_norm, 99)
+    vmin_denoised = np.percentile(denoised, 1)
+    vmax_denoised = np.percentile(denoised, 99)
     
-    # Top left: Noisy input
+    # Top left: Noisy input (normalized)
     axes[0, 0].imshow(
-        kymograph_noisy.T,
+        kymograph_noisy_norm.T,
         aspect="auto",
         origin="lower",
         vmin=vmin_noisy,
         vmax=vmax_noisy,
         cmap="gray",
     )
-    axes[0, 0].set_title("Noisy Input")
+    axes[0, 0].set_title("Noisy Input (Normalized)")
     axes[0, 0].set_xlabel("Time")
     axes[0, 0].set_ylabel("Position")
     
-    # Top right: Denoised only (no track overlay)
-    # Denormalize: denorm = norm * (max - min) + min + background
-    denoised_vis = denoised * (kymograph_max - kymograph_min) + kymograph_min + background_level
-    # Use denoised range for better contrast
-    vmin_denoised = np.percentile(denoised_vis, 1)
-    vmax_denoised = np.percentile(denoised_vis, 99)
+    # Top right: Denoised output (raw model output, no post-processing)
     im = axes[0, 1].imshow(
-        denoised_vis.T,
+        denoised.T,
         aspect="auto",
         origin="lower",
         vmin=vmin_denoised,
         vmax=vmax_denoised,
         cmap="gray",
     )
-    axes[0, 1].set_title("Denoised Output")
+    axes[0, 1].set_title("Model Prediction (Denoised)")
     axes[0, 1].set_xlabel("Time")
     axes[0, 1].set_ylabel("Position")
     
-    # Bottom left: Segmentation mask (after opening)
-    axes[1, 0].imshow(
-        segmentation_labels_opened.T,
+    # Bottom left: Binary segmentation mask (thresholded from probabilities)
+    im2 = axes[1, 0].imshow(
+        segmentation_binary.T,
         aspect="auto",
         origin="lower",
         vmin=0.0,
         vmax=1.0,
         cmap="gray",
+        interpolation="nearest",
     )
-    axes[1, 0].set_title("Segmentation Mask\n(opened, binary: 0=bg, 1=particle)")
+    axes[1, 0].set_title("Segmentation Mask (Binary)\n(thresholded at 0.5)")
     axes[1, 0].set_xlabel("Time")
     axes[1, 0].set_ylabel("Position")
+    plt.colorbar(im2, ax=axes[1, 0], label="Mask (0=bg, 1=particle)")
     
     # Bottom right: Estimated trajectory
-    # Set same limits as kymograph plots
-    time_len, width = kymograph_noisy.shape
+    time_len, width = kymograph_noisy_norm.shape
     if not np.all(np.isnan(estimated_path_pixels)):
         axes[1, 1].plot(estimated_path_pixels, color="blue", lw=1.0)
         axes[1, 1].set_xlim(0, time_len)

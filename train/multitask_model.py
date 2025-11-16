@@ -35,13 +35,14 @@ from utils.helpers import generate_kymograph, get_diffusion_coefficient
 
 
 class ConvBlock(nn.Module):
-    """Convolutional block with two conv layers, batch norm, and ReLU."""
-    def __init__(self, in_ch: int, out_ch: int, use_bn: bool = True) -> None:
+    """Convolutional block with two conv layers, batch norm, ReLU, and optional dropout."""
+    def __init__(self, in_ch: int, out_ch: int, use_bn: bool = True, dropout: float = 0.0) -> None:
         super().__init__()
         layers = [
             nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1),
             nn.BatchNorm2d(out_ch) if use_bn else nn.Identity(),
             nn.ReLU(inplace=True),
+            nn.Dropout2d(dropout) if dropout > 0 else nn.Identity(),
             nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1),
             nn.BatchNorm2d(out_ch) if use_bn else nn.Identity(),
             nn.ReLU(inplace=True),
@@ -68,35 +69,49 @@ class MultiTaskUNet(nn.Module):
     """U-Net with two output heads: denoising and segmentation.
     
     Architecture:
-    - Shared encoder-decoder backbone
+    - Shared encoder
+    - Separate decoders for denoising and segmentation
     - Two output heads:
       1. Denoising head: predicts noise (DDPM-style)
       2. Segmentation head: predicts binary mask (particle vs background)
     """
     
-    def __init__(self, base_channels: int = 48, use_bn: bool = True, max_tracks: int = 3) -> None:
+    def __init__(self, base_channels: int = 48, use_bn: bool = True, max_tracks: int = 3, 
+                 dropout: float = 0.0, encoder_dropout: float = 0.0, decoder_dropout: float = 0.0) -> None:
         super().__init__()
         self.max_tracks = max_tracks
         # Binary segmentation: 0 = background, 1 = particle (any track)
         
-        # Shared encoder
-        self.enc1 = ConvBlock(1, base_channels, use_bn=use_bn)
-        self.enc2 = ConvBlock(base_channels, base_channels * 2, use_bn=use_bn)
-        self.enc3 = ConvBlock(base_channels * 2, base_channels * 4, use_bn=use_bn)
+        # Shared encoder (dropout helps with generalization, commonly used in U-Nets/DDPM)
+        self.enc1 = ConvBlock(1, base_channels, use_bn=use_bn, dropout=encoder_dropout)
+        self.enc2 = ConvBlock(base_channels, base_channels * 2, use_bn=use_bn, dropout=encoder_dropout)
+        self.enc3 = ConvBlock(base_channels * 2, base_channels * 4, use_bn=use_bn, dropout=encoder_dropout)
         
         self.down = nn.MaxPool2d(2)
         
-        self.bottleneck = ConvBlock(base_channels * 4, base_channels * 8, use_bn=use_bn)
+        # Bottleneck dropout
+        self.bottleneck = ConvBlock(base_channels * 4, base_channels * 8, use_bn=use_bn, dropout=dropout)
         
-        # Shared decoder
-        self.up3 = nn.ConvTranspose2d(base_channels * 8, base_channels * 4, 2, stride=2)
-        self.dec3 = ConvBlock(base_channels * 8, base_channels * 4, use_bn=use_bn)
+        # Separate decoder for denoising (dropout in decoder helps prevent overfitting)
+        self.denoise_up3 = nn.ConvTranspose2d(base_channels * 8, base_channels * 4, 2, stride=2)
+        self.denoise_dec3 = ConvBlock(base_channels * 8, base_channels * 4, use_bn=use_bn, dropout=decoder_dropout)
         
-        self.up2 = nn.ConvTranspose2d(base_channels * 4, base_channels * 2, 2, stride=2)
-        self.dec2 = ConvBlock(base_channels * 4, base_channels * 2, use_bn=use_bn)
+        self.denoise_up2 = nn.ConvTranspose2d(base_channels * 4, base_channels * 2, 2, stride=2)
+        self.denoise_dec2 = ConvBlock(base_channels * 4, base_channels * 2, use_bn=use_bn, dropout=decoder_dropout)
         
-        self.up1 = nn.ConvTranspose2d(base_channels * 2, base_channels, 2, stride=2)
-        self.dec1 = ConvBlock(base_channels * 2, base_channels, use_bn=use_bn)
+        self.denoise_up1 = nn.ConvTranspose2d(base_channels * 2, base_channels, 2, stride=2)
+        self.denoise_dec1 = ConvBlock(base_channels * 2, base_channels, use_bn=use_bn, dropout=decoder_dropout)
+        
+        # Separate decoder for segmentation (dropout in decoder helps prevent overfitting)
+        # Simple approach: use denoised decoder features directly
+        self.segment_up3 = nn.ConvTranspose2d(base_channels * 8, base_channels * 4, 2, stride=2)
+        self.segment_dec3 = ConvBlock(base_channels * 8, base_channels * 4, use_bn=use_bn, dropout=decoder_dropout)
+        
+        self.segment_up2 = nn.ConvTranspose2d(base_channels * 4, base_channels * 2, 2, stride=2)
+        self.segment_dec2 = ConvBlock(base_channels * 4, base_channels * 2, use_bn=use_bn, dropout=decoder_dropout)
+        
+        self.segment_up1 = nn.ConvTranspose2d(base_channels * 2, base_channels, 2, stride=2)
+        self.segment_dec1 = ConvBlock(base_channels * 2, base_channels, use_bn=use_bn, dropout=decoder_dropout)
         
         # Two output heads
         # Head 1: Denoising (predicts noise, no activation)
@@ -107,38 +122,65 @@ class MultiTaskUNet(nn.Module):
         # Head 2: Segmentation (predicts binary logits, no activation - use BCEWithLogitsLoss)
         # Output: 1 channel (binary: 0=background, 1=particle)
         self.segment_head = nn.Conv2d(base_channels, 1, kernel_size=1)
-        nn.init.xavier_uniform_(self.segment_head.weight, gain=1.0)
-        nn.init.constant_(self.segment_head.bias, 0.0)
+        # Initialize with smaller weights to start from neutral predictions
+        nn.init.xavier_uniform_(self.segment_head.weight, gain=0.1)
+        # Initialize bias to slightly favor background (since it's more common)
+        nn.init.constant_(self.segment_head.bias, -0.5)
     
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Forward pass returns (predicted_noise, segmentation_mask)."""
+        # Shared encoder
         e1 = self.enc1(x)
         e2 = self.enc2(self.down(e1))
         e3 = self.enc3(self.down(e2))
         
         b = self.bottleneck(self.down(e3))
         
-        d3 = self.up3(b)
-        if d3.shape[2:] != e3.shape[2:]:
-            d3 = torch.nn.functional.interpolate(d3, size=e3.shape[2:], mode='bilinear', align_corners=False)
-        d3 = torch.cat([d3, e3], dim=1)
-        d3 = self.dec3(d3)
+        # Denoising decoder path
+        denoise_d3 = self.denoise_up3(b)
+        if denoise_d3.shape[2:] != e3.shape[2:]:
+            denoise_d3 = torch.nn.functional.interpolate(denoise_d3, size=e3.shape[2:], mode='bilinear', align_corners=False)
+        denoise_d3 = torch.cat([denoise_d3, e3], dim=1)
+        denoise_d3 = self.denoise_dec3(denoise_d3)
         
-        d2 = self.up2(d3)
-        if d2.shape[2:] != e2.shape[2:]:
-            d2 = torch.nn.functional.interpolate(d2, size=e2.shape[2:], mode='bilinear', align_corners=False)
-        d2 = torch.cat([d2, e2], dim=1)
-        d2 = self.dec2(d2)
+        denoise_d2 = self.denoise_up2(denoise_d3)
+        if denoise_d2.shape[2:] != e2.shape[2:]:
+            denoise_d2 = torch.nn.functional.interpolate(denoise_d2, size=e2.shape[2:], mode='bilinear', align_corners=False)
+        denoise_d2 = torch.cat([denoise_d2, e2], dim=1)
+        denoise_d2 = self.denoise_dec2(denoise_d2)
         
-        d1 = self.up1(d2)
-        if d1.shape[2:] != e1.shape[2:]:
-            d1 = torch.nn.functional.interpolate(d1, size=e1.shape[2:], mode='bilinear', align_corners=False)
-        d1 = torch.cat([d1, e1], dim=1)
-        d1 = self.dec1(d1)
+        denoise_d1 = self.denoise_up1(denoise_d2)
+        if denoise_d1.shape[2:] != e1.shape[2:]:
+            denoise_d1 = torch.nn.functional.interpolate(denoise_d1, size=e1.shape[2:], mode='bilinear', align_corners=False)
+        denoise_d1 = torch.cat([denoise_d1, e1], dim=1)
+        denoise_d1 = self.denoise_dec1(denoise_d1)
+        
+        # Segmentation decoder path - use denoised decoder features directly
+        # This makes segmentation leverage the smoother denoised features
+        segment_d3 = self.segment_up3(b)
+        if segment_d3.shape[2:] != e3.shape[2:]:
+            segment_d3 = torch.nn.functional.interpolate(segment_d3, size=e3.shape[2:], mode='bilinear', align_corners=False)
+        # Use denoised decoder features instead of encoder features for smoother segmentation
+        segment_d3 = torch.cat([segment_d3, denoise_d3], dim=1)
+        segment_d3 = self.segment_dec3(segment_d3)
+        
+        segment_d2 = self.segment_up2(segment_d3)
+        if segment_d2.shape[2:] != e2.shape[2:]:
+            segment_d2 = torch.nn.functional.interpolate(segment_d2, size=e2.shape[2:], mode='bilinear', align_corners=False)
+        # Use denoised decoder features
+        segment_d2 = torch.cat([segment_d2, denoise_d2], dim=1)
+        segment_d2 = self.segment_dec2(segment_d2)
+        
+        segment_d1 = self.segment_up1(segment_d2)
+        if segment_d1.shape[2:] != e1.shape[2:]:
+            segment_d1 = torch.nn.functional.interpolate(segment_d1, size=e1.shape[2:], mode='bilinear', align_corners=False)
+        # Use denoised decoder features
+        segment_d1 = torch.cat([segment_d1, denoise_d1], dim=1)
+        segment_d1 = self.segment_dec1(segment_d1)
         
         # Two output heads
-        predicted_noise = self.denoise_head(d1)  # No activation (can be positive/negative)
-        segmentation_logits = self.segment_head(d1)  # Binary logits: [B, 1, H, W]
+        predicted_noise = self.denoise_head(denoise_d1)  # No activation (can be positive/negative)
+        segmentation_logits = self.segment_head(segment_d1)  # Binary logits: [B, 1, H, W]
         
         return predicted_noise, segmentation_logits
 
@@ -289,18 +331,31 @@ class MultiTaskConfig:
     batch_size: int = 8
     learning_rate: float = 1e-3
     denoise_loss_weight: float = 1.0  # Weight for denoising loss
-    segment_loss_weight: float = 1.0  # Weight for segmentation loss
+    segment_loss_weight: float = 2.0  # Weight for segmentation loss (increased to prioritize segmentation)
     denoise_loss: str = "l2"  # "l2" or "l1"
-    segment_loss: str = "bce"  # "bce" (BinaryCrossEntropy) or "dice" (Dice for binary)
+    segment_loss: str = "bce"  # "bce" (BinaryCrossEntropy), "dice" (Dice for binary), or "focal" (Focal Loss)
+    focal_alpha: float = 0.25  # Alpha parameter for focal loss (class weighting)
+    focal_gamma: float = 2.0  # Gamma parameter for focal loss (focusing parameter)
     use_gradient_clipping: bool = True
     max_grad_norm: float = 1.0
+    weight_decay: float = 1e-4  # L2 regularization (weight decay) - prevents overfitting
+    dropout: float = 0.1  # Dropout rate for bottleneck (0 = disabled, typical: 0.1-0.3)
+    encoder_dropout: float = 0.1  # Dropout rate for encoder layers (0 = disabled, typical: 0.1-0.3, commonly used in U-Nets/DDPM)
+    decoder_dropout: float = 0.1  # Dropout rate for decoder layers (0 = disabled, typical: 0.1-0.3)
     use_lr_scheduler: bool = True
+    label_smoothing: float = 0.0  # Label smoothing for segmentation (0 = disabled, typical: 0.05-0.1)
     device: str = _default_device()
     checkpoint_dir: Optional[str] = None  # Directory to save checkpoints (None = don't save)
     save_best: bool = True  # Save best model based on total loss
     checkpoint_every: int = 1  # Save checkpoint every N epochs (1 = every epoch)
+    save_weights_every: bool = True  # Save weights-only file after each epoch checkpoint (for easy inference)
     segment_class_weights: Optional[Tuple[float, ...]] = None  # Deprecated: kept for compatibility, use pos_weight instead
     segment_pos_weight: Optional[float] = None  # Positive class weight for binary segmentation (None = auto, default 3.0)
+    segment_smoothness_weight: float = 0.0  # Weight for spatial smoothness loss (0 = disabled)
+    segment_flatness_loss: str = "tv"  # "none", "tv" (Total Variation - BEST for flatness), "laplacian", or "smoothness" (L2 gradients)
+    segment_flatness_weight: float = 0.2  # Weight for flatness loss (reduced to not compete with segmentation loss)
+    segment_flatness_range: int = 1  # Range over which to enforce flatness (1 = immediate neighbors, 2-3 = longer range)
+    segment_entropy_weight: float = 0.5  # Weight for entropy regularization (penalizes uncertain predictions, standard approach)
     resume_from: Optional[str] = None  # Path to checkpoint to resume training from (None = auto-detect latest)
     resume_epoch: Optional[int] = None  # Epoch number to resume from (if None, inferred from checkpoint)
     auto_resume: bool = True  # Automatically resume from latest checkpoint if available
@@ -488,6 +543,216 @@ def dice_loss_binary(pred: torch.Tensor, target: torch.Tensor, smooth: float = 1
     return 1.0 - dice
 
 
+def spatial_smoothness_loss(pred_logits: torch.Tensor) -> torch.Tensor:
+    """Spatial smoothness loss to encourage spatially consistent segmentation.
+    
+    Computes the L2 norm of gradients in time and space dimensions.
+    Lower values = smoother segmentation.
+    
+    Parameters:
+    -----------
+    pred_logits : torch.Tensor
+        Binary logits [B, 1, H, W] or [B, H, W]
+    
+    Returns:
+    --------
+    loss : torch.Tensor
+        Smoothness loss (scalar)
+    """
+    if pred_logits.dim() == 4:
+        pred = pred_logits.squeeze(1)  # [B, H, W]
+    else:
+        pred = pred_logits  # [B, H, W]
+    
+    # Compute gradients in time (vertical) and space (horizontal) dimensions
+    # Time gradient: difference along dimension 1 (H)
+    time_grad = pred[:, 1:, :] - pred[:, :-1, :]  # [B, H-1, W]
+    # Space gradient: difference along dimension 2 (W)
+    space_grad = pred[:, :, 1:] - pred[:, :, :-1]  # [B, H, W-1]
+    
+    # L2 norm of gradients (encourages smoothness)
+    smoothness = (time_grad ** 2).mean() + (space_grad ** 2).mean()
+    
+    return smoothness
+
+
+def total_variation_loss(pred_logits: torch.Tensor, range_size: int = 1) -> torch.Tensor:
+    """Total Variation (TV) loss to enforce flatness of segmentation mask over specified range.
+    
+    TV loss uses L1 norm of gradients, which encourages piecewise constant regions.
+    This is better than L2 for enforcing flatness because it penalizes small variations
+    more uniformly and encourages sharp boundaries between flat regions.
+    
+    Parameters:
+    -----------
+    pred_logits : torch.Tensor
+        Binary logits [B, 1, H, W] or [B, H, W]
+    range_size : int
+        Range over which to compute gradients (1 = immediate neighbors, 2 = 2 pixels apart, etc.)
+        Larger values enforce flatness over longer distances
+    
+    Returns:
+    --------
+    loss : torch.Tensor
+        TV loss (scalar)
+    """
+    if pred_logits.dim() == 4:
+        pred = pred_logits.squeeze(1)  # [B, H, W]
+    else:
+        pred = pred_logits  # [B, H, W]
+    
+    # Convert logits to probabilities for TV computation
+    pred_probs = torch.sigmoid(pred)
+    
+    # Compute gradients over specified range
+    # Time gradient: difference over range_size pixels along dimension 1 (H)
+    time_grad = pred_probs[:, range_size:, :] - pred_probs[:, :-range_size, :]  # [B, H-range_size, W]
+    # Space gradient: difference over range_size pixels along dimension 2 (W)
+    space_grad = pred_probs[:, :, range_size:] - pred_probs[:, :, :-range_size]  # [B, H, W-range_size]
+    
+    # Normalize by range_size to make loss scale-independent
+    time_grad = time_grad / range_size
+    space_grad = space_grad / range_size
+    
+    # L1 norm of gradients (Total Variation) - encourages flat regions over longer range
+    tv_loss = torch.abs(time_grad).mean() + torch.abs(space_grad).mean()
+    
+    return tv_loss
+
+
+def laplacian_flatness_loss(pred_logits: torch.Tensor, range_size: int = 1) -> torch.Tensor:
+    """Laplacian-based loss to enforce flatness (second-order smoothness) over specified range.
+    
+    Penalizes second derivatives (Laplacian), which enforces even flatter regions
+    than first-order gradients. This encourages regions to be locally constant.
+    
+    Parameters:
+    -----------
+    pred_logits : torch.Tensor
+        Binary logits [B, 1, H, W] or [B, H, W]
+    range_size : int
+        Range over which to compute second derivatives (1 = immediate neighbors, 2 = 2 pixels apart)
+        Larger values enforce flatness over longer distances
+    
+    Returns:
+    --------
+    loss : torch.Tensor
+        Laplacian flatness loss (scalar)
+    """
+    if pred_logits.dim() == 4:
+        pred = pred_logits.squeeze(1)  # [B, H, W]
+    else:
+        pred = pred_logits  # [B, H, W]
+    
+    # Convert logits to probabilities
+    pred_probs = torch.sigmoid(pred)
+    
+    # Compute second derivatives (Laplacian approximation) over specified range
+    # Time dimension: second derivative over range_size
+    time_second = (pred_probs[:, 2*range_size:, :] - 
+                   2 * pred_probs[:, range_size:-range_size, :] + 
+                   pred_probs[:, :-2*range_size, :])
+    # Space dimension: second derivative over range_size
+    space_second = (pred_probs[:, :, 2*range_size:] - 
+                    2 * pred_probs[:, :, range_size:-range_size] + 
+                    pred_probs[:, :, :-2*range_size])
+    
+    # Normalize by range_size^2 to make loss scale-independent
+    time_second = time_second / (range_size ** 2)
+    space_second = space_second / (range_size ** 2)
+    
+    # L1 norm of second derivatives (encourages locally flat regions over longer range)
+    laplacian_loss = torch.abs(time_second).mean() + torch.abs(space_second).mean()
+    
+    return laplacian_loss
+
+
+def focal_loss_binary(
+    pred_logits: torch.Tensor,
+    target: torch.Tensor,
+    alpha: float = 0.25,
+    gamma: float = 2.0,
+) -> torch.Tensor:
+    """Focal Loss for binary segmentation.
+    
+    Focal loss addresses class imbalance by down-weighting easy examples
+    and focusing on hard examples.
+    
+    Parameters:
+    -----------
+    pred_logits : torch.Tensor
+        Binary logits [B, 1, H, W] or [B, H, W]
+    target : torch.Tensor
+        Binary labels [B, H, W] with values in [0, 1]
+    alpha : float
+        Weighting factor for rare class (default: 0.25)
+    gamma : float
+        Focusing parameter (default: 2.0, higher = more focus on hard examples)
+    
+    Returns:
+    --------
+    loss : torch.Tensor
+        Focal loss (scalar)
+    """
+    if pred_logits.dim() == 4:
+        pred_logits = pred_logits.squeeze(1)  # [B, H, W]
+    
+    # Compute BCE loss
+    bce_loss = nn.functional.binary_cross_entropy_with_logits(
+        pred_logits, target, reduction='none'
+    )
+    
+    # Convert logits to probabilities
+    pt = torch.exp(-bce_loss)  # pt = p if target=1, else 1-p
+    
+    # Compute focal weight: (1 - pt)^gamma
+    focal_weight = (1 - pt) ** gamma
+    
+    # Apply alpha weighting: alpha for positive class, (1-alpha) for negative
+    alpha_t = alpha * target + (1 - alpha) * (1 - target)
+    
+    # Focal loss
+    focal_loss = alpha_t * focal_weight * bce_loss
+    
+    return focal_loss.mean()
+
+
+def entropy_regularization_loss(pred_logits: torch.Tensor) -> torch.Tensor:
+    """Entropy regularization loss (standard approach for penalizing uncertainty).
+    
+    Penalizes high entropy (uncertain predictions) in the probability distribution.
+    This encourages confident predictions without specifically targeting 0.5.
+    
+    Entropy for binary: H(p) = -p*log(p) - (1-p)*log(1-p)
+    - Maximum entropy at p=0.5 (most uncertain)
+    - Minimum entropy at p=0 or p=1 (most certain)
+    
+    Parameters:
+    -----------
+    pred_logits : torch.Tensor
+        Binary logits [B, 1, H, W] or [B, H, W]
+    
+    Returns:
+    --------
+    loss : torch.Tensor
+        Entropy regularization loss (scalar)
+    """
+    if pred_logits.dim() == 4:
+        pred_logits = pred_logits.squeeze(1)  # [B, H, W]
+    
+    # Convert logits to probabilities
+    pred_probs = torch.sigmoid(pred_logits)  # [B, H, W], values in [0, 1]
+    
+    # Compute binary entropy: -p*log(p) - (1-p)*log(1-p)
+    # Add small epsilon to avoid log(0)
+    eps = 1e-8
+    entropy = -(pred_probs * torch.log(pred_probs + eps) + 
+                (1 - pred_probs) * torch.log(1 - pred_probs + eps))
+    
+    # Return mean entropy (higher entropy = more uncertain = higher penalty)
+    return entropy.mean()
+
+
 def _find_latest_checkpoint(checkpoint_dir: str) -> Optional[str]:
     """Find the latest checkpoint file in the checkpoint directory.
     
@@ -534,7 +799,14 @@ def train_multitask_model(
     """
     
     # Create model
-    model = MultiTaskUNet(base_channels=48, use_bn=True, max_tracks=dataset.max_trajectories).to(config.device)
+    model = MultiTaskUNet(
+        base_channels=48, 
+        use_bn=True, 
+        max_tracks=dataset.max_trajectories,
+        dropout=config.dropout,
+        encoder_dropout=config.encoder_dropout,
+        decoder_dropout=config.decoder_dropout
+    ).to(config.device)
     
     # Resume from checkpoint if specified or auto-detect
     start_epoch = 0
@@ -545,10 +817,10 @@ def train_multitask_model(
     if checkpoint_path is None and config.auto_resume and config.checkpoint_dir:
         checkpoint_path = _find_latest_checkpoint(config.checkpoint_dir)
         if checkpoint_path:
-            print(f"\n🔍 Auto-detected latest checkpoint: {checkpoint_path}")
+            print(f"\n?? Auto-detected latest checkpoint: {checkpoint_path}")
     
     if checkpoint_path and os.path.exists(checkpoint_path):
-        print(f"\n📂 Resuming training from checkpoint: {checkpoint_path}")
+        print(f"\n?? Resuming training from checkpoint: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location=config.device, weights_only=False)
         
         # Handle both old format (just state_dict) and new format (full checkpoint)
@@ -565,17 +837,17 @@ def train_multitask_model(
             # Old format: just model weights (for inference checkpoints)
             try:
                 model.load_state_dict(checkpoint)
-                print(f"  ⚠ Loaded model weights (old checkpoint format)")
+                print(f"  ? Loaded model weights (old checkpoint format)")
                 print(f"  Starting from epoch 0 (no training state in checkpoint)")
                 start_epoch = 0
                 best_loss = float('inf')
             except Exception as e:
-                print(f"  ✗ Error loading checkpoint: {e}")
+                print(f"  ? Error loading checkpoint: {e}")
                 print(f"  Starting training from scratch")
                 start_epoch = 0
                 best_loss = float('inf')
     elif checkpoint_path:
-        print(f"⚠ Warning: Resume checkpoint not found: {checkpoint_path}")
+        print(f"? Warning: Resume checkpoint not found: {checkpoint_path}")
         print("  Starting training from scratch")
     
     # Loss functions
@@ -601,13 +873,34 @@ def train_multitask_model(
         pos_weight = torch.tensor([pos_weight_val], device=config.device, dtype=torch.float32)
         print(f"  Segmentation pos_weight: {pos_weight.cpu().numpy()}")
         segment_criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        
+        # Apply label smoothing if enabled
+        if config.label_smoothing > 0:
+            print(f"  Label smoothing: {config.label_smoothing}")
+            # Wrap criterion to apply label smoothing
+            original_criterion = segment_criterion
+            def smoothed_criterion(pred, target):
+                # Apply label smoothing: smooth hard labels (0, 1) to (smoothing, 1-smoothing)
+                # For binary: 0 -> smoothing, 1 -> 1-smoothing
+                smooth_target = target * (1 - 2 * config.label_smoothing) + config.label_smoothing
+                return original_criterion(pred, smooth_target)
+            segment_criterion = smoothed_criterion
     elif config.segment_loss == "dice":
         segment_criterion = lambda pred, target: dice_loss_binary(pred, target)
+    elif config.segment_loss == "focal":
+        segment_criterion = lambda pred, target: focal_loss_binary(
+            pred, target, alpha=config.focal_alpha, gamma=config.focal_gamma
+        )
+        print(f"  Focal loss: alpha={config.focal_alpha}, gamma={config.focal_gamma}")
     else:
         raise ValueError(f"Unknown segment loss: {config.segment_loss}")
     
-    # Optimizer
-    optimizer = optim.Adam(model.parameters(), lr=config.learning_rate)
+    # Optimizer with weight decay (L2 regularization)
+    optimizer = optim.Adam(
+        model.parameters(), 
+        lr=config.learning_rate,
+        weight_decay=config.weight_decay
+    )
     
     # Resume optimizer state if resuming (only for new checkpoint format)
     checkpoint_path_for_optimizer = config.resume_from
@@ -615,7 +908,8 @@ def train_multitask_model(
         checkpoint_path_for_optimizer = _find_latest_checkpoint(config.checkpoint_dir)
     
     if checkpoint_path_for_optimizer and os.path.exists(checkpoint_path_for_optimizer):
-        checkpoint = torch.load(checkpoint_path_for_optimizer, map_location=config.device)
+        # Load checkpoint with weights_only=False to handle MultiTaskConfig
+        checkpoint = torch.load(checkpoint_path_for_optimizer, map_location=config.device, weights_only=False)
         if 'optimizer_state_dict' in checkpoint:
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             print(f"  Resumed optimizer state")
@@ -624,7 +918,7 @@ def train_multitask_model(
     scheduler = None
     if config.use_lr_scheduler:
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='min', factor=0.5, patience=2
+            optimizer, mode='min', factor=0.5, patience=5, min_lr=1e-5
         )
         # Resume scheduler state if resuming (only for new checkpoint format)
         checkpoint_path_for_scheduler = config.resume_from
@@ -632,7 +926,7 @@ def train_multitask_model(
             checkpoint_path_for_scheduler = _find_latest_checkpoint(config.checkpoint_dir)
         
         if checkpoint_path_for_scheduler and os.path.exists(checkpoint_path_for_scheduler):
-            checkpoint = torch.load(checkpoint_path_for_scheduler, map_location=config.device)
+            checkpoint = torch.load(checkpoint_path_for_scheduler, map_location=config.device, weights_only=False)
             if 'scheduler_state_dict' in checkpoint:
                 scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
                 print(f"  Resumed scheduler state")
@@ -648,6 +942,21 @@ def train_multitask_model(
     print(f"  Learning rate: {config.learning_rate}")
     print(f"  Denoise loss: {config.denoise_loss} (weight: {config.denoise_loss_weight})")
     print(f"  Segment loss: {config.segment_loss} (weight: {config.segment_loss_weight})")
+    if config.segment_flatness_weight > 0:
+        print(f"  Segment flatness loss: {config.segment_flatness_loss} (weight: {config.segment_flatness_weight}, range: {config.segment_flatness_range})")
+    if config.segment_smoothness_weight > 0:
+        print(f"  Segment smoothness loss: weight={config.segment_smoothness_weight}")
+    if config.segment_entropy_weight > 0:
+        print(f"  Segment entropy regularization: weight={config.segment_entropy_weight} (penalizes uncertain predictions)")
+    print(f"  Weight decay (L2): {config.weight_decay}")
+    if config.encoder_dropout > 0:
+        print(f"  Dropout (encoder): {config.encoder_dropout}")
+    if config.dropout > 0:
+        print(f"  Dropout (bottleneck): {config.dropout}")
+    if config.decoder_dropout > 0:
+        print(f"  Dropout (decoder): {config.decoder_dropout}")
+    if config.label_smoothing > 0:
+        print(f"  Label smoothing: {config.label_smoothing}")
     print(f"  Dataset size: {len(dataset)}")
     if config.checkpoint_dir:
         os.makedirs(config.checkpoint_dir, exist_ok=True)
@@ -688,17 +997,48 @@ def train_multitask_model(
             elif config.segment_loss == "dice":
                 # Dice loss expects: pred [B, 1, H, W], target [B, H, W] with values in [0, 1]
                 segment_loss = segment_criterion(pred_mask_logits, true_mask)
+            elif config.segment_loss == "focal":
+                # Focal loss expects: pred [B, 1, H, W] or [B, H, W], target [B, H, W] with values in [0, 1]
+                segment_loss = segment_criterion(pred_mask_logits, true_mask)
             else:
                 raise ValueError(f"Unknown segment loss: {config.segment_loss}")
+            
+            # Flatness loss (enforces flatness of segmentation mask over specified range)
+            flatness_loss = torch.tensor(0.0, device=config.device)
+            if config.segment_flatness_weight > 0 and config.segment_flatness_loss != "none":
+                if config.segment_flatness_loss == "tv":
+                    flatness_loss = total_variation_loss(pred_mask_logits, range_size=config.segment_flatness_range)
+                elif config.segment_flatness_loss == "laplacian":
+                    flatness_loss = laplacian_flatness_loss(pred_mask_logits, range_size=config.segment_flatness_range)
+                elif config.segment_flatness_loss == "smoothness":
+                    flatness_loss = spatial_smoothness_loss(pred_mask_logits)
+                else:
+                    raise ValueError(f"Unknown flatness loss: {config.segment_flatness_loss}")
+            
+            # Legacy smoothness loss (for backward compatibility)
+            smoothness_loss = spatial_smoothness_loss(pred_mask_logits) if config.segment_smoothness_weight > 0 else torch.tensor(0.0, device=config.device)
+            
+            # Entropy regularization (penalizes uncertain predictions, standard approach)
+            entropy_loss = entropy_regularization_loss(pred_mask_logits) if config.segment_entropy_weight > 0 else torch.tensor(0.0, device=config.device)
             
             # Combined loss
             total_loss = (
                 config.denoise_loss_weight * denoise_loss +
-                config.segment_loss_weight * segment_loss
+                config.segment_loss_weight * segment_loss +
+                config.segment_smoothness_weight * smoothness_loss +
+                config.segment_flatness_weight * flatness_loss +
+                config.segment_entropy_weight * entropy_loss
             )
             
             # Backward pass
             total_loss.backward()
+            
+            # Monitor gradients for segmentation head (diagnostic)
+            if batch_idx == 0 and epoch % 2 == 0:  # Print every 2 epochs, first batch
+                seg_head_grad = model.segment_head.weight.grad
+                if seg_head_grad is not None:
+                    grad_norm = seg_head_grad.norm().item()
+                    print(f"\n  [Debug] Segment head grad norm: {grad_norm:.6f}")
             
             # Gradient clipping
             if config.use_gradient_clipping:
@@ -712,9 +1052,16 @@ def train_multitask_model(
             batch_count += 1
             
             # Update progress bar with current losses
+            smoothness_val = smoothness_loss.item() if config.segment_smoothness_weight > 0 else 0.0
+            flatness_val = flatness_loss.item() if config.segment_flatness_weight > 0 else 0.0
+            entropy_val = entropy_loss.item() if config.segment_entropy_weight > 0 else 0.0
+            current_lr = optimizer.param_groups[0]['lr']
             pbar.set_postfix({
                 'denoise': f'{denoise_loss.item():.4f}',
                 'segment': f'{segment_loss.item():.4f}',
+                'flat': f'{flatness_val:.4f}',
+                'entropy': f'{entropy_val:.4f}',
+                'lr': f'{current_lr:.2e}',
                 'total': f'{total_loss.item():.4f}'
             })
         
@@ -745,7 +1092,13 @@ def train_multitask_model(
             if scheduler is not None:
                 checkpoint['scheduler_state_dict'] = scheduler.state_dict()
             torch.save(checkpoint, checkpoint_path)
-            print(f"  💾 Checkpoint saved: {checkpoint_path}")
+            print(f"  ?? Checkpoint saved: {checkpoint_path}")
+            
+            # Save weights-only file for easy inference (can Ctrl+C and use this)
+            if config.save_weights_every:
+                weights_path = os.path.join(config.checkpoint_dir, f"weights_epoch_{epoch+1}.pth")
+                torch.save(model.state_dict(), weights_path)
+                print(f"  ?? Weights saved: {weights_path}")
         
         # Save best model if configured
         if config.save_best and avg_total_loss < best_loss:
@@ -763,7 +1116,13 @@ def train_multitask_model(
                 if scheduler is not None:
                     checkpoint['scheduler_state_dict'] = scheduler.state_dict()
                 torch.save(checkpoint, best_path)
-                print(f"  ✓ New best model saved (loss: {best_loss:.6f})")
+                print(f"  ? New best model saved (loss: {best_loss:.6f})")
+                
+                # Also save weights-only for best model
+                if config.save_weights_every:
+                    best_weights_path = os.path.join(config.checkpoint_dir, "best_weights.pth")
+                    torch.save(model.state_dict(), best_weights_path)
+                    print(f"  ?? Best weights saved: {best_weights_path}")
         
         if scheduler is not None:
             scheduler.step(avg_total_loss)
@@ -784,21 +1143,60 @@ def load_multitask_model(path: str, device: str = None, max_tracks: int = 3) -> 
     Handles both formats:
     - Checkpoint format: dict with 'model_state_dict' key
     - Model format: direct state_dict
+    
+    Note: Dropout is set to 0.0 for inference (disabled during eval mode anyway).
     """
     if device is None:
         device = _default_device()
     
-    model = MultiTaskUNet(base_channels=48, use_bn=True, max_tracks=max_tracks).to(device)
-    # Load checkpoint (weights_only=False for compatibility with checkpoints containing custom classes)
-    checkpoint = torch.load(path, map_location=device, weights_only=False)
+    # Create model with dropout=0.0 for inference (dropout disabled in eval mode anyway)
+    model = MultiTaskUNet(
+        base_channels=48, 
+        use_bn=True, 
+        max_tracks=max_tracks,
+        dropout=0.0,
+        encoder_dropout=0.0,
+        decoder_dropout=0.0
+    ).to(device)
     
-    # Handle both checkpoint format and direct state_dict format
-    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-        # Checkpoint format: extract model_state_dict
-        model.load_state_dict(checkpoint['model_state_dict'])
-    else:
-        # Direct state_dict format
-        model.load_state_dict(checkpoint)
+    # Try loading with weights_only first (for weights-only files)
+    try:
+        state_dict = torch.load(path, map_location=device, weights_only=True)
+        model.load_state_dict(state_dict)
+    except Exception:
+        # If that fails, try loading full checkpoint (may contain config, optimizer, etc.)
+        # Import the module to make classes available for pickle
+        import sys
+        import importlib
+        # Ensure the module is imported so pickle can find MultiTaskConfig
+        if 'train.multitask_model' not in sys.modules:
+            import train.multitask_model
+        
+        try:
+            checkpoint = torch.load(path, map_location=device, weights_only=False)
+        except AttributeError as e:
+            # If MultiTaskConfig can't be found, try to fix the module path
+            if 'MultiTaskConfig' in str(e):
+                # Create a dummy config class in the current namespace for pickle
+                import types
+                # Get the actual module
+                mtm_module = sys.modules.get('train.multitask_model')
+                if mtm_module:
+                    # Temporarily add to __main__ namespace
+                    import __main__
+                    if not hasattr(__main__, 'MultiTaskConfig'):
+                        __main__.MultiTaskConfig = getattr(mtm_module, 'MultiTaskConfig')
+                checkpoint = torch.load(path, map_location=device, weights_only=False)
+            else:
+                raise
+        
+        # Handle both checkpoint format and direct state_dict format
+        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+            # Checkpoint format: extract model_state_dict
+            model.load_state_dict(checkpoint['model_state_dict'])
+        else:
+            # Direct state_dict format
+            model.load_state_dict(checkpoint)
     
     model.eval()
     return model
@@ -898,6 +1296,9 @@ if __name__ == "__main__":
         n_samples=1024,
         length=512,
         width=512,
+        radii_nm=(3.0, 70.0),  # Extended to match test data (test shows up to ~68 nm)
+        contrast=(0.5, 1.1),    # Extended to match test data (test shows up to ~1.03)
+        noise_level=(0.08, 0.8),  # Extended upper bound to include high noise levels (>0.5)
         multi_trajectory_prob=0.3,
         max_trajectories=3,
         mask_peak_width_samples=2.0,
@@ -907,11 +1308,22 @@ if __name__ == "__main__":
     config = MultiTaskConfig(
         epochs=12,
         batch_size=8,
-        learning_rate=1e-3,
+        learning_rate=1.5e-3,  # Slightly reduced from 2e-3 for more stable training
         denoise_loss_weight=1.0,
-        segment_loss_weight=1.0,
+        segment_loss_weight=2.0,  # Reduced from 3.0 now that it's learning
         denoise_loss="l2",
-        segment_loss="bce",  # BinaryCrossEntropy for binary segmentation
+        segment_loss="focal",  # Focal loss works well - keep it
+        focal_alpha=0.25,
+        focal_gamma=2.0,
+        segment_flatness_loss="tv",  # Re-enable flatness now that segmentation is learning
+        segment_flatness_weight=0.1,  # Start with low weight, can increase later
+        segment_flatness_range=2,  # Range for flatness (1=immediate neighbors, 2-3=longer range)
+        segment_entropy_weight=0.5,  # Entropy regularization (increased to reduce uncertainty on test data)
+        weight_decay=1e-4,  # L2 regularization to prevent overfitting
+        dropout=0.1,  # Dropout in bottleneck
+        encoder_dropout=0.1,  # Dropout in encoder layers (commonly used in U-Nets/DDPM)
+        decoder_dropout=0.1,  # Dropout in decoder layers (helps prevent overfitting)
+        label_smoothing=0.0,  # Keep disabled for now (can enable later if needed)
         use_gradient_clipping=True,
         max_grad_norm=1.0,
         use_lr_scheduler=True,
