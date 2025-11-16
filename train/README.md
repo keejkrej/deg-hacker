@@ -137,6 +137,9 @@ python train/multitask_model.py --weights models/checkpoints/checkpoint_epoch_5.
 - `multi_trajectory_prob`: Probability of multi-particle examples (default: 0.3)
 - `max_trajectories`: Maximum number of tracks (default: 3)
 - `mask_peak_width_samples`: Segmentation mask width in pixels (default: 2.0)
+- `window_length`: Optional time window (in frames) cropped from each synthetic
+  example. Set this to 16 to train on 512(space) × 16(time) patches while still
+  simulating full-length sequences.
 
 ### Training Parameters (`MultiTaskConfig`)
 - `epochs`: Number of training epochs

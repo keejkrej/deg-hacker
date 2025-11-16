@@ -3,9 +3,9 @@ Visualize Training Set Examples
 
 Processes and visualizes examples from the training dataset to:
 1. Show model performance on training data
-2. Visualize denoising and segmentation outputs
+2. Visualize denoising and locator heatmap outputs
 3. Compare ground truth vs predictions
-4. Display segmentation labels for different tracks
+4. Display per-particle heatmaps for different tracks
 """
 
 import os
@@ -13,10 +13,8 @@ import sys
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
-from matplotlib.colors import ListedColormap
-from matplotlib import colormaps
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional
 import shutil
 
 # Add parent directory to path for imports
@@ -54,39 +52,58 @@ def visualize_training_example(
     output_dir : str
         Directory to save figures
     show_segmentation_labels : bool
-        Whether to show segmentation class labels
+        Whether to overlay ground-truth heatmap contours
     """
     # Get training example
-    noisy_tensor, noise_tensor, mask_tensor = dataset[index]
+    noisy_tensor, noise_tensor, heatmap_tensor = dataset[index]
     noisy = noisy_tensor.squeeze().numpy()
     true_noise = noise_tensor.squeeze().numpy()
-    true_mask = mask_tensor.squeeze().numpy()
+    true_heatmaps = heatmap_tensor.numpy()
 
     # Get ground truth denoised
     gt_denoised = noisy - true_noise
+    time_len, space_len = noisy.shape
+    display_aspect = time_len / max(space_len, 1)
 
     # Run inference
     model.eval()
     with torch.no_grad():
         # For 512x512, no chunking needed (fits in one chunk)
-        denoised, embeddings = denoise_and_segment_chunked(
-            model, noisy, device=device, chunk_size=512, overlap=64
+        denoised, heatmaps = denoise_and_segment_chunked(
+            model, noisy, device=device, chunk_size=16, overlap=8
         )
+    heatmap_probs = 1.0 / (1.0 + np.exp(-heatmaps))
 
     # Create visualization
     os.makedirs(output_dir, exist_ok=True)
-    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    n_tracks = true_heatmaps.shape[0]
+    n_cols = max(3, n_tracks)
+    fig, axes = plt.subplots(
+        2,
+        n_cols,
+        figsize=(4 * n_cols, 8),
+        sharex="col",
+        sharey="row",
+        constrained_layout=True,
+        gridspec_kw={"height_ratios": [1, 1]},
+    )
 
     # Color maps
     vmin_noisy = np.percentile(noisy, 1)
     vmax_noisy = np.percentile(noisy, 99)
     vmin_denoised = np.percentile(gt_denoised, 1)
     vmax_denoised = np.percentile(gt_denoised, 99)
+    heat_slice = heatmap_probs[:, :, :n_tracks]
+    if heat_slice.size > 0:
+        vmin_heat = np.percentile(heat_slice, 1)
+        vmax_heat = np.percentile(heat_slice, 99)
+    else:
+        vmin_heat, vmax_heat = 0.0, 1.0
 
     # Row 1: Input, Ground Truth, Denoised
     axes[0, 0].imshow(
         noisy.T,
-        aspect="auto",
+        aspect=display_aspect,
         origin="lower",
         vmin=vmin_noisy,
         vmax=vmax_noisy,
@@ -98,7 +115,7 @@ def visualize_training_example(
 
     axes[0, 1].imshow(
         gt_denoised.T,
-        aspect="auto",
+        aspect=display_aspect,
         origin="lower",
         vmin=vmin_denoised,
         vmax=vmax_denoised,
@@ -110,7 +127,7 @@ def visualize_training_example(
 
     axes[0, 2].imshow(
         denoised.T,
-        aspect="auto",
+        aspect=display_aspect,
         origin="lower",
         vmin=vmin_denoised,
         vmax=vmax_denoised,
@@ -119,143 +136,48 @@ def visualize_training_example(
     axes[0, 2].set_title("Model Prediction (Denoised)")
     axes[0, 2].set_xlabel("Time")
     axes[0, 2].set_ylabel("Position")
+    # Hide unused axes in first row if n_cols > 3
+    for col in range(3, n_cols):
+        axes[0, col].axis("off")
 
-    # Row 2: Embeddings visualization
-    # Ground truth multi-instance mask
-    max_instance_id = int(true_mask.max())
-    # Use a discrete colormap for instance segmentation
-    # Background (0) will be black, instances will have distinct colors
-
-    # Create colormap: black for background, distinct colors for instances
-    if max_instance_id > 0:
-        # Use tab10 colormap for instances (has 10 distinct colors)
-        # Get enough colors for all instances
-        base_cmap = colormaps.get_cmap("tab10")
-        base_colors = base_cmap(np.linspace(0, 1, 10))
-        colors = ["black"]  # Background is black
-        for i in range(max_instance_id):
-            colors.append(base_colors[i % len(base_colors)])
-        cmap = ListedColormap(colors)
-        vmax = max_instance_id
-    else:
-        # No instances, just background
-        cmap = "gray"
-        vmax = 1
-
-    im1 = axes[1, 0].imshow(
-        true_mask.T,
-        aspect="auto",
-        origin="lower",
-        cmap=cmap,
-        vmin=0,
-        vmax=vmax,
-        interpolation="nearest",
-    )
-    axes[1, 0].set_title("Ground Truth Multi-Instance Mask")
-    axes[1, 0].set_xlabel("Time")
-    axes[1, 0].set_ylabel("Position")
-    if max_instance_id > 0:
-        plt.colorbar(
-            im1,
-            ax=axes[1, 0],
-            label="Instance ID (0=bg, 1..N=instances)",
-            ticks=range(max_instance_id + 1),
-        )
-    else:
-        plt.colorbar(im1, ax=axes[1, 0], label="Mask (0=bg)")
-
-    # Visualize 2D embeddings as color
-    embedding_dim = embeddings.shape[2]
-
-    if embedding_dim == 2:
-        # 2D embeddings: convert to color using HSV
-        emb_x = embeddings[:, :, 0]
-        emb_y = embeddings[:, :, 1]
-
-        # Angle -> Hue, Magnitude -> Saturation
-        angle = np.arctan2(emb_y, emb_x)
-        magnitude = np.sqrt(emb_x**2 + emb_y**2)
-
-        hue = (angle + np.pi) / (2 * np.pi)  # [0, 1]
-
-        mag_min, mag_max = np.percentile(magnitude, [1, 99])
-        if mag_max > mag_min:
-            saturation = np.clip((magnitude - mag_min) / (mag_max - mag_min), 0, 1)
-        else:
-            saturation = np.ones_like(magnitude) * 0.5
-
-        from matplotlib.colors import hsv_to_rgb
-
-        hsv = np.stack([hue, saturation, np.ones_like(hue)], axis=2)
-        emb_rgb = hsv_to_rgb(hsv)  # Shape: (time, width, 3)
-
-        # Transpose spatial dimensions only: (time, width, 3) -> (width, time, 3)
-        emb_rgb_display = np.transpose(emb_rgb, (1, 0, 2))
-        im2 = axes[1, 1].imshow(emb_rgb_display, aspect="auto", origin="lower")
-        axes[1, 1].set_title("Embeddings (2D → Color)")
-    elif embedding_dim >= 3:
-        # Use first 3 dimensions as RGB
-        emb_rgb = np.zeros((embeddings.shape[0], embeddings.shape[1], 3))
-        for i in range(3):
-            emb_dim = embeddings[:, :, i]
-            vmin, vmax = np.percentile(emb_dim, [1, 99])
-            if vmax > vmin:
-                emb_rgb[:, :, i] = np.clip((emb_dim - vmin) / (vmax - vmin), 0, 1)
-            else:
-                emb_rgb[:, :, i] = 0.5
-        # Transpose spatial dimensions only: (time, width, 3) -> (width, time, 3)
-        emb_rgb_display = np.transpose(emb_rgb, (1, 0, 2))
-        im2 = axes[1, 1].imshow(emb_rgb_display, aspect="auto", origin="lower")
-        axes[1, 1].set_title(
-            f"Embeddings (First 3 dims as RGB)\nTotal dims: {embedding_dim}"
-        )
-        # No colorbar for RGB images
-    else:
-        # Single dimension: show as grayscale
-        emb_vis = embeddings[:, :, 0]
-        vmin, vmax = np.percentile(emb_vis, [1, 99])
-        im2 = axes[1, 1].imshow(
-            emb_vis.T,
-            aspect="auto",
+    # Row 2: per-track heatmaps
+    heat_im = None
+    for track_idx in range(n_tracks):
+        ax = axes[1, track_idx]
+        pred_heat = heatmap_probs[:, :, track_idx]
+        gt_heat = true_heatmaps[track_idx]
+        heat_im = ax.imshow(
+            pred_heat.T,
+            aspect=display_aspect,
             origin="lower",
-            vmin=vmin,
-            vmax=vmax,
-            cmap="viridis",
+            vmin=vmin_heat,
+            vmax=vmax_heat,
+            cmap="inferno",
         )
-        axes[1, 1].set_title(f"Embeddings (Dim 0)\nTotal dims: {embedding_dim}")
-        plt.colorbar(im2, ax=axes[1, 1])  # Colorbar only for scalar images
-    axes[1, 1].set_xlabel("Time")
-    axes[1, 1].set_ylabel("Position")
+        if show_segmentation_labels:
+            levels = np.linspace(0.3, 0.9, 3)
+            ax.contour(
+                gt_heat.T,
+                levels=levels,
+                colors="cyan",
+                linewidths=0.8,
+                alpha=0.8,
+            )
+        ax.set_title(f"Particle {track_idx + 1} Heatmap")
+        ax.set_xlabel("Time")
+        ax.set_ylabel("Position")
+    if heat_im is not None:
+        cbar = fig.colorbar(
+            heat_im,
+            ax=axes[1, :n_tracks],
+            fraction=0.03,
+            pad=0.02,
+            label="Heat",
+        )
 
-    # Show embedding magnitude or PCA visualization
-    if show_segmentation_labels:
-        # Compute embedding magnitude (L2 norm)
-        emb_magnitude = np.linalg.norm(embeddings, axis=2)
-        vmin, vmax = np.percentile(emb_magnitude, [1, 99])
-        im3 = axes[1, 2].imshow(
-            emb_magnitude.T,
-            aspect="auto",
-            origin="lower",
-            vmin=vmin,
-            vmax=vmax,
-            cmap="hot",
-        )
-        axes[1, 2].set_title("Embedding Magnitude\n(L2 norm)")
-        axes[1, 2].set_xlabel("Time")
-        axes[1, 2].set_ylabel("Position")
-        plt.colorbar(im3, ax=axes[1, 2], label="Magnitude")
-    else:
-        # Show denoising error
-        denoising_error = np.abs(gt_denoised - denoised)
-        im3 = axes[1, 2].imshow(
-            denoising_error.T, aspect="auto", origin="lower", cmap="hot", vmin=0
-        )
-        axes[1, 2].set_title("Denoising Error\n(Ground Truth - Prediction)")
-        axes[1, 2].set_xlabel("Time")
-        axes[1, 2].set_ylabel("Position")
-        plt.colorbar(im3, ax=axes[1, 2], label="Absolute Error")
-
-    plt.tight_layout()
+    # Hide extra axes in second row if any
+    for col in range(n_tracks, n_cols):
+        axes[1, col].axis("off")
 
     # Save figure
     filename = f"training_example_{index:04d}.png"
@@ -270,23 +192,13 @@ def visualize_training_example(
     print(f"    Denoising MAE: {np.mean(np.abs(gt_denoised - denoised)):.4f}")
     print(f"    Denoising RMSE: {np.sqrt(np.mean((gt_denoised - denoised) ** 2)):.4f}")
 
-    # Embedding statistics
-    print(f"    Embedding shape: {embeddings.shape}")
-    print(f"    Embedding dims: {embeddings.shape[2]}")
-    print(f"    Embedding range: [{embeddings.min():.3f}, {embeddings.max():.3f}]")
-    print(f"    Embedding mean: {embeddings.mean():.3f}, std: {embeddings.std():.3f}")
+    # Heatmap statistics
+    print(f"    Heatmap shape: {heatmaps.shape}")
+    print(f"    Heatmap range: [{heatmaps.min():.3f}, {heatmaps.max():.3f}]")
+    print(f"    Heatmap mean: {heatmaps.mean():.3f}, std: {heatmaps.std():.3f}")
 
-    # Ground truth mask statistics
-    unique_instances = np.unique(true_mask)
-    n_instances = len(unique_instances[unique_instances > 0])  # Exclude background (0)
-    print(f"    GT instances: {n_instances}")
-    if n_instances > 0:
-        instance_ids = unique_instances[unique_instances > 0]
-        for inst_id in instance_ids:
-            coverage = np.mean(true_mask == inst_id) * 100
-            print(f"      Instance {int(inst_id)}: {coverage:.1f}% coverage")
-    bg_coverage = np.mean(true_mask == 0) * 100
-    print(f"    GT background coverage: {bg_coverage:.1f}%")
+    active_channels = np.sum(true_heatmaps.max(axis=(1, 2)) > 0.05)
+    print(f"    Active GT heatmaps: {active_channels}/{n_tracks}")
 
 
 def visualize_training_set(
@@ -317,7 +229,7 @@ def visualize_training_set(
     max_trajectories : int
         Maximum number of trajectories in dataset
     show_segmentation_labels : bool
-        Whether to show segmentation class labels
+        Whether to overlay ground-truth heatmap contours
     """
     print("=" * 70)
     print("TRAINING SET VISUALIZATION")
@@ -357,6 +269,7 @@ def visualize_training_set(
         width=dataset_width,
         max_trajectories=max_trajectories,
         multi_trajectory_prob=1.0,  # 100% multi-particle examples
+        window_length=16,
     )
 
     # Visualize examples
@@ -420,7 +333,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--no_segmentation",
         action="store_true",
-        help="Don't show segmentation labels (show denoising error instead)",
+        help="Don't overlay ground-truth heatmaps",
     )
 
     args = parser.parse_args()

@@ -236,7 +236,7 @@ class TestChunkedProcessing:
         # Create large kymograph (larger than chunk size)
         kymograph = np.random.rand(2000, 512).astype(np.float32)
         denoised = denoise_kymograph_chunked(
-            model, kymograph, chunk_size=512, overlap=64
+            model, kymograph, chunk_size=16, overlap=8
         )
         
         assert denoised.shape == kymograph.shape
@@ -250,7 +250,7 @@ class TestChunkedProcessing:
         # Create small kymograph (smaller than chunk size)
         kymograph = np.random.rand(256, 256).astype(np.float32)
         denoised = denoise_kymograph_chunked(
-            model, kymograph, chunk_size=512, overlap=64
+            model, kymograph, chunk_size=16, overlap=8
         )
         
         assert denoised.shape == kymograph.shape
@@ -264,7 +264,7 @@ class TestChunkedProcessing:
         # Create very large kymograph (needs 2D chunking)
         kymograph = np.random.rand(2000, 1000).astype(np.float32)
         denoised = denoise_kymograph_chunked(
-            model, kymograph, chunk_size=512, overlap=64
+            model, kymograph, chunk_size=16, overlap=8
         )
         
         assert denoised.shape == kymograph.shape

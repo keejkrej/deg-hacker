@@ -20,8 +20,8 @@ cd deg-hacker
 
 2. Create and activate conda environment:
 ```bash
-conda create -n ml python=3.12
-conda activate ml
+conda create -n kymo python=3.13
+conda activate kymo
 ```
 
 3. Install dependencies:
@@ -191,7 +191,7 @@ Diagnostic figures saved to `figures/` showing:
 ## Notes
 
 - **Do not modify `helpers.py`**: Core utility functions are maintained separately
-- **Use conda `ml` environment**: `conda activate ml` before running
+- **Use conda `kymo` environment**: `conda activate kymo` before running
 - **Model checkpoints**: Trained models saved in `models/` directory
 - **Crossing events**: Tracks are automatically excluded after crossing to prevent ambiguous data
 

@@ -1,13 +1,13 @@
-"""Train a multi-task U-Net that outputs both denoised kymograph and segmentation mask.
+"""Train a multi-task U-Net that outputs both denoised kymograph and locator heatmaps.
 
 This single model performs both tasks:
 1. Denoising: Predicts noise to subtract (DDPM-style)
-2. Segmentation: Outputs probability map of particle locations
+2. Localization: Predicts per-particle heatmaps that highlight likely positions
 
 Benefits:
 - Shared encoder learns common features
 - More efficient than two separate models
-- Better feature learning through multi-task learning
+- Better feature learning through multi-task learning while keeping tracking classical
 """
 
 from dataclasses import dataclass
@@ -21,10 +21,8 @@ import numpy as np
 import torch
 from torch import nn, optim
 from torch.utils.data import Dataset, DataLoader
-import matplotlib.pyplot as plt
 from tqdm import tqdm
 from scipy.optimize import linear_sum_assignment
-from scipy.ndimage import label
 
 # Add parent directory to path for imports (only needed if not installed as package)
 if str(Path(__file__).parent.parent) not in sys.path:
@@ -65,168 +63,220 @@ def _default_device() -> str:
         return "cpu"
 
 
-class MultiTaskUNet(nn.Module):
-    """U-Net with two output heads: denoising and embedding-based instance segmentation.
-    
-    Architecture:
-    - Shared encoder
-    - Separate decoders for denoising and segmentation
-    - Two output heads:
-      1. Denoising head: predicts noise (DDPM-style)
-      2. Embedding head: predicts instance embeddings for clustering-based instance segmentation
-    """
-    
-    def __init__(self, base_channels: int = 48, use_bn: bool = True, max_tracks: int = 3, 
-                 dropout: float = 0.0, encoder_dropout: float = 0.0, decoder_dropout: float = 0.0,
-                 embedding_dim: int = 8) -> None:
+class DenoiseUNet(nn.Module):
+    """UNet that only predicts denoising residuals."""
+
+    def __init__(self, base_channels: int = 48, use_bn: bool = True,
+                 dropout: float = 0.0, encoder_dropout: float = 0.0,
+                 decoder_dropout: float = 0.0) -> None:
         super().__init__()
-        self.max_tracks = max_tracks
-        self.embedding_dim = embedding_dim
-        # Embedding-based instance segmentation: embeddings are clustered to get instances
-        
-        # Shared encoder (dropout helps with generalization, commonly used in U-Nets/DDPM)
         self.enc1 = ConvBlock(1, base_channels, use_bn=use_bn, dropout=encoder_dropout)
         self.enc2 = ConvBlock(base_channels, base_channels * 2, use_bn=use_bn, dropout=encoder_dropout)
         self.enc3 = ConvBlock(base_channels * 2, base_channels * 4, use_bn=use_bn, dropout=encoder_dropout)
-        
-        self.down = nn.MaxPool2d(2)
-        
-        # Bottleneck dropout
+        self.down = nn.MaxPool2d(kernel_size=(1, 2), stride=(1, 2))
         self.bottleneck = ConvBlock(base_channels * 4, base_channels * 8, use_bn=use_bn, dropout=dropout)
-        
-        # Separate decoder for denoising (dropout in decoder helps prevent overfitting)
-        self.denoise_up3 = nn.ConvTranspose2d(base_channels * 8, base_channels * 4, 2, stride=2)
-        self.denoise_dec3 = ConvBlock(base_channels * 8, base_channels * 4, use_bn=use_bn, dropout=decoder_dropout)
-        
-        self.denoise_up2 = nn.ConvTranspose2d(base_channels * 4, base_channels * 2, 2, stride=2)
-        self.denoise_dec2 = ConvBlock(base_channels * 4, base_channels * 2, use_bn=use_bn, dropout=decoder_dropout)
-        
-        self.denoise_up1 = nn.ConvTranspose2d(base_channels * 2, base_channels, 2, stride=2)
-        self.denoise_dec1 = ConvBlock(base_channels * 2, base_channels, use_bn=use_bn, dropout=decoder_dropout)
-        
-        # Separate decoder for segmentation (dropout in decoder helps prevent overfitting)
-        # Simple approach: use denoised decoder features directly
-        self.segment_up3 = nn.ConvTranspose2d(base_channels * 8, base_channels * 4, 2, stride=2)
-        self.segment_dec3 = ConvBlock(base_channels * 8, base_channels * 4, use_bn=use_bn, dropout=decoder_dropout)
-        
-        self.segment_up2 = nn.ConvTranspose2d(base_channels * 4, base_channels * 2, 2, stride=2)
-        self.segment_dec2 = ConvBlock(base_channels * 4, base_channels * 2, use_bn=use_bn, dropout=decoder_dropout)
-        
-        self.segment_up1 = nn.ConvTranspose2d(base_channels * 2, base_channels, 2, stride=2)
-        self.segment_dec1 = ConvBlock(base_channels * 2, base_channels, use_bn=use_bn, dropout=decoder_dropout)
-        
-        # Two output heads
-        # Head 1: Denoising (predicts noise, no activation)
-        self.denoise_head = nn.Conv2d(base_channels, 1, kernel_size=1)
-        nn.init.xavier_uniform_(self.denoise_head.weight, gain=0.1)
-        nn.init.constant_(self.denoise_head.bias, 0.0)
-        
-        # Head 2: Embeddings (predicts instance embeddings for clustering-based segmentation)
-        # Output: embedding_dim channels (continuous vectors for clustering)
-        self.embedding_head = nn.Conv2d(base_channels, embedding_dim, kernel_size=1)
-        # Initialize embeddings to small random values
-        nn.init.xavier_uniform_(self.embedding_head.weight, gain=0.1)
-        nn.init.constant_(self.embedding_head.bias, 0.0)
-    
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Forward pass returns (predicted_noise, embeddings)."""
-        # Shared encoder
+        self.up3 = nn.ConvTranspose2d(base_channels * 8, base_channels * 4, kernel_size=(1, 2), stride=(1, 2))
+        self.dec3 = ConvBlock(base_channels * 8, base_channels * 4, use_bn=use_bn, dropout=decoder_dropout)
+        self.up2 = nn.ConvTranspose2d(base_channels * 4, base_channels * 2, kernel_size=(1, 2), stride=(1, 2))
+        self.dec2 = ConvBlock(base_channels * 4, base_channels * 2, use_bn=use_bn, dropout=decoder_dropout)
+        self.up1 = nn.ConvTranspose2d(base_channels * 2, base_channels, kernel_size=(1, 2), stride=(1, 2))
+        self.dec1 = ConvBlock(base_channels * 2, base_channels, use_bn=use_bn, dropout=decoder_dropout)
+        self.head = nn.Conv2d(base_channels, 1, kernel_size=1)
+        nn.init.xavier_uniform_(self.head.weight, gain=0.1)
+        nn.init.constant_(self.head.bias, 0.0)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         e1 = self.enc1(x)
         e2 = self.enc2(self.down(e1))
         e3 = self.enc3(self.down(e2))
-        
         b = self.bottleneck(self.down(e3))
-        
-        # Denoising decoder path
-        denoise_d3 = self.denoise_up3(b)
-        if denoise_d3.shape[2:] != e3.shape[2:]:
-            denoise_d3 = torch.nn.functional.interpolate(denoise_d3, size=e3.shape[2:], mode='bilinear', align_corners=False)
-        denoise_d3 = torch.cat([denoise_d3, e3], dim=1)
-        denoise_d3 = self.denoise_dec3(denoise_d3)
-        
-        denoise_d2 = self.denoise_up2(denoise_d3)
-        if denoise_d2.shape[2:] != e2.shape[2:]:
-            denoise_d2 = torch.nn.functional.interpolate(denoise_d2, size=e2.shape[2:], mode='bilinear', align_corners=False)
-        denoise_d2 = torch.cat([denoise_d2, e2], dim=1)
-        denoise_d2 = self.denoise_dec2(denoise_d2)
-        
-        denoise_d1 = self.denoise_up1(denoise_d2)
-        if denoise_d1.shape[2:] != e1.shape[2:]:
-            denoise_d1 = torch.nn.functional.interpolate(denoise_d1, size=e1.shape[2:], mode='bilinear', align_corners=False)
-        denoise_d1 = torch.cat([denoise_d1, e1], dim=1)
-        denoise_d1 = self.denoise_dec1(denoise_d1)
-        
-        # Segmentation decoder path - use denoised decoder features directly
-        # This makes segmentation leverage the smoother denoised features
-        segment_d3 = self.segment_up3(b)
-        if segment_d3.shape[2:] != e3.shape[2:]:
-            segment_d3 = torch.nn.functional.interpolate(segment_d3, size=e3.shape[2:], mode='bilinear', align_corners=False)
-        # Use denoised decoder features instead of encoder features for smoother segmentation
-        segment_d3 = torch.cat([segment_d3, denoise_d3], dim=1)
-        segment_d3 = self.segment_dec3(segment_d3)
-        
-        segment_d2 = self.segment_up2(segment_d3)
-        if segment_d2.shape[2:] != e2.shape[2:]:
-            segment_d2 = torch.nn.functional.interpolate(segment_d2, size=e2.shape[2:], mode='bilinear', align_corners=False)
-        # Use denoised decoder features
-        segment_d2 = torch.cat([segment_d2, denoise_d2], dim=1)
-        segment_d2 = self.segment_dec2(segment_d2)
-        
-        segment_d1 = self.segment_up1(segment_d2)
-        if segment_d1.shape[2:] != e1.shape[2:]:
-            segment_d1 = torch.nn.functional.interpolate(segment_d1, size=e1.shape[2:], mode='bilinear', align_corners=False)
-        # Use denoised decoder features
-        segment_d1 = torch.cat([segment_d1, denoise_d1], dim=1)
-        segment_d1 = self.segment_dec1(segment_d1)
-        
-        # Two output heads
-        predicted_noise = self.denoise_head(denoise_d1)  # No activation (can be positive/negative)
-        embeddings = self.embedding_head(segment_d1)  # Embeddings: [B, embedding_dim, H, W]
-        
-        return predicted_noise, embeddings
+
+        d3 = self.up3(b)
+        if d3.shape[2:] != e3.shape[2:]:
+            d3 = torch.nn.functional.interpolate(d3, size=e3.shape[2:], mode='bilinear', align_corners=False)
+        d3 = torch.cat([d3, e3], dim=1)
+        d3 = self.dec3(d3)
+
+        d2 = self.up2(d3)
+        if d2.shape[2:] != e2.shape[2:]:
+            d2 = torch.nn.functional.interpolate(d2, size=e2.shape[2:], mode='bilinear', align_corners=False)
+        d2 = torch.cat([d2, e2], dim=1)
+        d2 = self.dec2(d2)
+
+        d1 = self.up1(d2)
+        if d1.shape[2:] != e1.shape[2:]:
+            d1 = torch.nn.functional.interpolate(d1, size=e1.shape[2:], mode='bilinear', align_corners=False)
+        d1 = torch.cat([d1, e1], dim=1)
+        d1 = self.dec1(d1)
+
+        return self.head(d1)
 
 
-def create_instance_mask(paths: np.ndarray, shape: Tuple[int, int], 
-                         peak_width_samples: float = 2.0, max_tracks: int = 3) -> np.ndarray:
-    """Create instance segmentation mask from particle paths.
-    
-    Returns:
-    --------
-    mask : np.ndarray
-        Instance labels: 0=background, 1..N=instance IDs (one per particle)
-        Shape: (length, width), dtype: int32
-    """
+class SegmentationUNet(nn.Module):
+    """UNet that produces per-pixel heatmaps from denoised inputs."""
+
+    def __init__(self, base_channels: int = 48, use_bn: bool = True,
+                 dropout: float = 0.0, encoder_dropout: float = 0.0,
+                 decoder_dropout: float = 0.0,
+                 in_channels: int = 1,
+                 out_channels: int = 1) -> None:
+        super().__init__()
+        self.enc1 = ConvBlock(in_channels, base_channels, use_bn=use_bn, dropout=encoder_dropout)
+        self.enc2 = ConvBlock(base_channels, base_channels * 2, use_bn=use_bn, dropout=encoder_dropout)
+        self.enc3 = ConvBlock(base_channels * 2, base_channels * 4, use_bn=use_bn, dropout=encoder_dropout)
+        self.down = nn.MaxPool2d(kernel_size=(1, 2), stride=(1, 2))
+        self.bottleneck = ConvBlock(base_channels * 4, base_channels * 8, use_bn=use_bn, dropout=dropout)
+        self.up3 = nn.ConvTranspose2d(base_channels * 8, base_channels * 4, kernel_size=(1, 2), stride=(1, 2))
+        self.dec3 = ConvBlock(base_channels * 8, base_channels * 4, use_bn=use_bn, dropout=decoder_dropout)
+        self.up2 = nn.ConvTranspose2d(base_channels * 4, base_channels * 2, kernel_size=(1, 2), stride=(1, 2))
+        self.dec2 = ConvBlock(base_channels * 4, base_channels * 2, use_bn=use_bn, dropout=decoder_dropout)
+        self.up1 = nn.ConvTranspose2d(base_channels * 2, base_channels, kernel_size=(1, 2), stride=(1, 2))
+        self.dec1 = ConvBlock(base_channels * 2, base_channels, use_bn=use_bn, dropout=decoder_dropout)
+        self.heatmap_head = nn.Conv2d(base_channels, out_channels, kernel_size=1)
+        nn.init.xavier_uniform_(self.heatmap_head.weight, gain=0.1)
+        nn.init.constant_(self.heatmap_head.bias, 0.0)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        e1 = self.enc1(x)
+        e2 = self.enc2(self.down(e1))
+        e3 = self.enc3(self.down(e2))
+        b = self.bottleneck(self.down(e3))
+
+        d3 = self.up3(b)
+        if d3.shape[2:] != e3.shape[2:]:
+            d3 = torch.nn.functional.interpolate(d3, size=e3.shape[2:], mode='bilinear', align_corners=False)
+        d3 = torch.cat([d3, e3], dim=1)
+        d3 = self.dec3(d3)
+
+        d2 = self.up2(d3)
+        if d2.shape[2:] != e2.shape[2:]:
+            d2 = torch.nn.functional.interpolate(d2, size=e2.shape[2:], mode='bilinear', align_corners=False)
+        d2 = torch.cat([d2, e2], dim=1)
+        d2 = self.dec2(d2)
+
+        d1 = self.up1(d2)
+        if d1.shape[2:] != e1.shape[2:]:
+            d1 = torch.nn.functional.interpolate(d1, size=e1.shape[2:], mode='bilinear', align_corners=False)
+        d1 = torch.cat([d1, e1], dim=1)
+        d1 = self.dec1(d1)
+
+        return self.heatmap_head(d1)
+
+
+class MultiTaskUNet(nn.Module):
+    """Wrapper that couples independent denoising and heatmap U-Nets."""
+
+    def __init__(self, base_channels: int = 48, use_bn: bool = True, max_tracks: int = 3,
+                 dropout: float = 0.0, encoder_dropout: float = 0.0, decoder_dropout: float = 0.0) -> None:
+        super().__init__()
+        self.max_tracks = max_tracks
+        self.denoiser = DenoiseUNet(
+            base_channels=base_channels,
+            use_bn=use_bn,
+            dropout=dropout,
+            encoder_dropout=encoder_dropout,
+            decoder_dropout=decoder_dropout,
+        )
+        self.segmenter = SegmentationUNet(
+            base_channels=base_channels,
+            use_bn=use_bn,
+            dropout=dropout,
+            encoder_dropout=encoder_dropout,
+            decoder_dropout=decoder_dropout,
+            in_channels=1,
+            out_channels=max_tracks,
+        )
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        predicted_noise = self.denoiser(x)
+        denoised = torch.clamp(x - predicted_noise, 0.0, 1.0)
+        heatmaps = self.segmenter(denoised.detach())
+        return predicted_noise, heatmaps
+
+
+def create_particle_heatmaps(
+    paths: np.ndarray,
+    shape: Tuple[int, int],
+    peak_width_samples: float = 2.0,
+    max_tracks: int = 3,
+) -> np.ndarray:
+    """Create per-particle Gaussian heatmaps."""
     length, width = shape
-    mask = np.zeros((length, width), dtype=np.int32)  # Background = 0
-    
-    # Handle single particle case
     if paths.ndim == 1:
         paths = paths.reshape(1, -1)
-    
     n_particles, path_length = paths.shape
+    n_channels = min(max_tracks, n_particles)
+    heatmaps = np.zeros((max_tracks, length, width), dtype=np.float32)
     xs = np.arange(width, dtype=np.float32)
-    
-    for t in range(min(length, path_length)):
-        for i in range(n_particles):
+    for i in range(n_channels):
+        for t in range(min(length, path_length)):
             pos = paths[i, t]
-            if not np.isnan(pos):
-                # Create Gaussian around particle position
-                gaussian = np.exp(-0.5 * ((xs - pos) / peak_width_samples) ** 2)
-                # Assign to instance mask: instance ID = i + 1 (0 is background)
-                mask_indices = gaussian > 0.1  # Threshold for assignment
-                # For overlapping particles, use maximum (later particle overwrites)
-                # This creates distinct instance IDs
-                mask[t, mask_indices] = np.where(
-                    gaussian[mask_indices] > 0.1,
-                    i + 1,  # Instance ID (1-indexed)
-                    mask[t, mask_indices]
-                )
-    
-    return mask
+            if np.isnan(pos):
+                continue
+            gaussian = np.exp(-0.5 * ((xs - pos) / peak_width_samples) ** 2)
+        heatmaps[i, t] = np.maximum(heatmaps[i, t], gaussian)
+    return heatmaps
+
+
+def channel_separation_loss(logits: torch.Tensor) -> torch.Tensor:
+    """Penalize overlap between per-channel heatmaps."""
+    if logits.ndim != 4:
+        raise ValueError("Expected heatmap logits with shape [B, C, H, W]")
+    batch, channels, _, _ = logits.shape
+    if channels <= 1 or batch == 0:
+        return logits.new_tensor(0.0)
+    probs = torch.sigmoid(logits)
+    loss = logits.new_tensor(0.0)
+    pair_count = 0
+    for i in range(channels):
+        for j in range(i + 1, channels):
+            loss = loss + (probs[:, i] * probs[:, j]).mean()
+            pair_count += 1
+    if pair_count == 0:
+        return logits.new_tensor(0.0)
+    return loss / pair_count
+
+
+def align_heatmaps_with_hungarian(
+    pred_heatmaps: torch.Tensor, true_heatmaps: torch.Tensor, eps: float = 1e-6
+) -> torch.Tensor:
+    """Align ground-truth heatmaps to predictions via Hungarian matching."""
+    if pred_heatmaps.shape != true_heatmaps.shape:
+        raise ValueError("Predicted and true heatmaps must have same shape")
+    batch, channels, _, _ = pred_heatmaps.shape
+    if channels <= 1 or batch == 0:
+        return true_heatmaps
+
+    with torch.no_grad():
+        matched = torch.zeros_like(true_heatmaps)
+        pred_probs = torch.sigmoid(pred_heatmaps.detach())
+        for b in range(batch):
+            cost = pred_heatmaps.new_zeros((channels, channels))
+            pred_flat = pred_probs[b].view(channels, -1)
+            gt_flat = true_heatmaps[b].view(channels, -1)
+            for i in range(channels):
+                pred_i = pred_flat[i]
+                pred_sum = pred_i.sum()
+                for j in range(channels):
+                    gt_j = gt_flat[j]
+                    gt_sum = gt_j.sum()
+                    numerator = 2.0 * torch.sum(pred_i * gt_j)
+                    denom = pred_sum + gt_sum + eps
+                    dice = numerator / denom
+                    cost[i, j] = 1.0 - dice
+            row_ind, col_ind = linear_sum_assignment(cost.detach().cpu().numpy())
+            for pred_idx, gt_idx in zip(row_ind, col_ind):
+                matched[b, pred_idx] = true_heatmaps[b, gt_idx]
+    return matched
 
 
 class MultiTaskDataset(Dataset):
-    """Dataset for multi-task training: noisy kymograph -> (noise, segmentation_mask)."""
+    """Dataset for multi-task training: noisy kymograph -> (noise, per-particle heatmaps).
+
+    When ``window_length`` is provided the dataset samples random time windows of that
+    length (e.g., 16 frames) from the full synthetic kymograph so the network trains
+    on tall spatial slices with short temporal context.
+    """
     
     def __init__(
         self,
@@ -243,6 +293,7 @@ class MultiTaskDataset(Dataset):
         multi_trajectory_prob: float = 0.3,
         max_trajectories: int = 3,
         mask_peak_width_samples: float = 2.0,
+        window_length: Optional[int] = None,
     ) -> None:
         self.length = length
         self.width = width
@@ -256,7 +307,14 @@ class MultiTaskDataset(Dataset):
         self.multi_trajectory_prob = multi_trajectory_prob
         self.max_trajectories = max_trajectories
         self.mask_peak_width_samples = mask_peak_width_samples
+        self.window_length = int(window_length) if window_length is not None else None
         self.rng = np.random.default_rng(seed)
+
+        if self.window_length is not None:
+            if self.window_length <= 0:
+                raise ValueError("window_length must be positive")
+            if self.window_length > self.length:
+                raise ValueError("window_length cannot exceed total length")
     
     def __len__(self) -> int:
         return self.n_samples
@@ -309,22 +367,31 @@ class MultiTaskDataset(Dataset):
         
         # Compute true noise (for denoising task)
         true_noise = noisy - gt
-        
-        # Create instance mask (for embedding-based segmentation task)
+
+        # Create per-particle heatmaps
         peak_width_samples = self.peak_width / self.dx
-        mask = create_instance_mask(
+        heatmaps = create_particle_heatmaps(
             paths,
             shape=(self.length, self.width),
             peak_width_samples=max(peak_width_samples, self.mask_peak_width_samples),
             max_tracks=self.max_trajectories
         )
+
+        # Optionally crop along time dimension to create shorter windows
+        if self.window_length is not None and self.window_length < self.length:
+            max_start = self.length - self.window_length
+            start_idx = int(self.rng.integers(0, max_start + 1))
+            end_idx = start_idx + self.window_length
+            noisy = noisy[start_idx:end_idx]
+            true_noise = true_noise[start_idx:end_idx]
+            heatmaps = heatmaps[:, start_idx:end_idx]
         
         # Convert to tensors
         noisy_tensor = torch.from_numpy(noisy).unsqueeze(0).float()
         noise_tensor = torch.from_numpy(true_noise).unsqueeze(0).float()
-        mask_tensor = torch.from_numpy(mask).long()  # Long tensor for instance mask (0=bg, 1..N=instances)
+        heatmap_tensor = torch.from_numpy(heatmaps).float()
         
-        return noisy_tensor, noise_tensor, mask_tensor
+        return noisy_tensor, noise_tensor, heatmap_tensor
 
 
 @dataclass
@@ -334,11 +401,12 @@ class MultiTaskConfig:
     batch_size: int = 8
     learning_rate: float = 1e-3
     denoise_loss_weight: float = 1.0  # Weight for denoising loss
-    segment_loss_weight: float = 2.0  # Weight for segmentation loss (increased to prioritize segmentation)
+    heatmap_loss_weight: float = 2.0  # Weight for locator heatmap loss
+    channel_separation_weight: float = 0.1  # Penalize overlap across heatmap channels
+    use_hungarian_matching: bool = True  # Align GT masks with predictions per batch
     denoise_loss: str = "l2"  # "l2" or "l1"
-    segment_loss: str = "bce"  # "bce" (BinaryCrossEntropy), "dice" (Dice for binary), or "focal" (Focal Loss)
-    focal_alpha: float = 0.25  # Alpha parameter for focal loss (class weighting)
-    focal_gamma: float = 2.0  # Gamma parameter for focal loss (focusing parameter)
+    heatmap_loss: str = "bce"  # "bce" or "mse"
+    heatmap_pos_weight: Optional[float] = None  # Optional positive weighting for BCE heatmap loss
     use_gradient_clipping: bool = True
     max_grad_norm: float = 1.0
     weight_decay: float = 1e-4  # L2 regularization (weight decay) - prevents overfitting
@@ -351,183 +419,13 @@ class MultiTaskConfig:
     checkpoint_dir: Optional[str] = None  # Directory to save checkpoints (None = don't save)
     save_best: bool = True  # Save best model based on total loss
     checkpoint_every: int = 1  # Save checkpoint every N epochs (1 = every epoch)
-    segment_class_weights: Optional[Tuple[float, ...]] = None  # Deprecated: kept for compatibility, use pos_weight instead
-    segment_pos_weight: Optional[float] = None  # Positive class weight for binary segmentation (None = auto, default 3.0)
-    segment_smoothness_weight: float = 0.0  # Weight for spatial smoothness loss (0 = disabled)
-    segment_flatness_loss: str = "tv"  # "none", "tv" (Total Variation - BEST for flatness), "laplacian", or "smoothness" (L2 gradients)
-    segment_flatness_weight: float = 0.2  # Weight for flatness loss (reduced to not compete with segmentation loss)
-    segment_flatness_range: int = 1  # Range over which to enforce flatness (1 = immediate neighbors, 2-3 = longer range)
-    segment_entropy_weight: float = 0.5  # Weight for entropy regularization (penalizes uncertain predictions, standard approach)
-    # Embedding loss parameters
-    embedding_loss_weight: float = 2.0  # Weight for embedding loss (replaces segmentation loss)
-    embedding_var_weight: float = 1.0  # Weight for variance loss (pull same-instance together)
-    embedding_sep_weight: float = 1.5  # Weight for separation loss (push different instances apart) - ENHANCED
-    embedding_bg_weight: float = 0.5  # Weight for background loss
-    embedding_smoothness_weight: float = 0.1  # Weight for smoothness loss (reduces noise)
-    embedding_reg_weight: float = 0.01  # Weight for L2 regularization on embeddings
-    embedding_separation_margin: float = 2.0  # Minimum distance between instance embeddings - ENHANCED
-    embedding_dim: int = 2  # Dimension of embedding vectors (2D like CellPose)
+    auto_balance_losses: bool = True  # Automatically rebalance denoise vs heatmap losses
+    balance_min_scale: float = 0.1  # Clamp for adaptive denoise weight scaling
+    balance_max_scale: float = 10.0
     resume_from: Optional[str] = None  # Path to checkpoint to resume training from (None = auto-detect latest)
     resume_epoch: Optional[int] = None  # Epoch number to resume from (if None, inferred from checkpoint)
     auto_resume: bool = False  # Automatically resume from latest checkpoint if available (opt-in)
     init_weights: Optional[str] = None  # Initialize model weights from this path (no optimizer state)
-
-
-def compute_instance_iou(mask_pred: np.ndarray, mask_gt: np.ndarray) -> float:
-    """Compute IoU between two binary instance masks."""
-    intersection = np.logical_and(mask_pred, mask_gt).sum()
-    union = np.logical_or(mask_pred, mask_gt).sum()
-    if union == 0:
-        return 0.0
-    return float(intersection / union)
-
-
-def extract_instances_from_mask(mask: np.ndarray, class_id: int) -> list[np.ndarray]:
-    """Extract individual instance masks for a given class from a multi-class mask.
-    
-    Returns list of binary masks, one per connected component.
-    """
-    binary = (mask == class_id).astype(np.uint8)
-    labeled, num_features = label(binary)
-    instances = []
-    for i in range(1, num_features + 1):
-        instances.append((labeled == i).astype(np.float32))
-    return instances
-
-
-def hungarian_matching_loss(
-    pred_logits: torch.Tensor,
-    target_mask: torch.Tensor,
-    n_classes: int,
-    base_criterion: nn.Module,
-) -> torch.Tensor:
-    """
-    Compute instance segmentation loss using Hungarian matching.
-    
-    For each sample in the batch:
-    1. Extract predicted instances (one per class > 0)
-    2. Extract ground truth instances (one per class > 0)
-    3. Compute IoU matrix between all predicted and GT instances
-    4. Use Hungarian matching to find optimal assignment
-    5. Compute loss only on matched pairs
-    
-    Parameters:
-    -----------
-    pred_logits : torch.Tensor
-        [B, C, H, W] predicted logits
-    target_mask : torch.Tensor
-        [B, H, W] ground truth class labels
-    n_classes : int
-        Number of classes (including background)
-    base_criterion : nn.Module
-        Base loss criterion (e.g., CrossEntropyLoss)
-    
-    Returns:
-    --------
-    loss : torch.Tensor
-        Scalar loss value
-    """
-    B, C, H, W = pred_logits.shape
-    device = pred_logits.device
-    
-    # Convert to numpy for instance extraction
-    pred_probs = torch.softmax(pred_logits, dim=1)  # [B, C, H, W]
-    pred_labels = torch.argmax(pred_logits, dim=1)  # [B, H, W]
-    
-    total_loss = 0.0
-    n_valid_samples = 0
-    
-    for b in range(B):
-        pred_mask_np = pred_labels[b].cpu().numpy()  # [H, W]
-        target_mask_np = target_mask[b].cpu().numpy()  # [H, W]
-        
-        # Extract GT instances (one per class > 0)
-        gt_instances = []
-        gt_classes = []
-        for class_id in range(1, n_classes):  # Skip background (0)
-            instances = extract_instances_from_mask(target_mask_np, class_id)
-            for inst in instances:
-                gt_instances.append(inst)
-                gt_classes.append(class_id)
-        
-        # Extract predicted instances (one per class > 0)
-        pred_instances = []
-        pred_classes = []
-        for class_id in range(1, n_classes):  # Skip background (0)
-            instances = extract_instances_from_mask(pred_mask_np, class_id)
-            for inst in instances:
-                pred_instances.append(inst)
-                pred_classes.append(class_id)
-        
-        # If no instances, use standard loss
-        if len(gt_instances) == 0 and len(pred_instances) == 0:
-            # Both empty - just compute standard loss for this sample
-            sample_loss = base_criterion(
-                pred_logits[b:b+1],  # [1, C, H, W]
-                target_mask[b:b+1]   # [1, H, W]
-            )
-            total_loss += sample_loss
-            n_valid_samples += 1
-            continue
-        
-        # Build cost matrix: -IoU (negative because we want to maximize IoU)
-        n_pred = len(pred_instances)
-        n_gt = len(gt_instances)
-        
-        if n_pred == 0 or n_gt == 0:
-            # Mismatch: penalize all unmatched instances
-            # Use standard loss but with high weight for unmatched
-            sample_loss = base_criterion(
-                pred_logits[b:b+1],
-                target_mask[b:b+1]
-            )
-            # Penalty for unmatched instances
-            if n_pred > 0:
-                sample_loss = sample_loss * (1.0 + 0.5 * n_pred)
-            if n_gt > 0:
-                sample_loss = sample_loss * (1.0 + 0.5 * n_gt)
-            total_loss += sample_loss
-            n_valid_samples += 1
-            continue
-        
-        # Compute IoU matrix
-        cost_matrix = np.zeros((n_pred, n_gt))
-        for i, pred_inst in enumerate(pred_instances):
-            for j, gt_inst in enumerate(gt_instances):
-                iou = compute_instance_iou(pred_inst, gt_inst)
-                cost_matrix[i, j] = -iou  # Negative because Hungarian minimizes
-        
-        # Hungarian matching
-        pred_indices, gt_indices = linear_sum_assignment(cost_matrix)
-        
-        # Create matched target mask: remap GT classes to match predicted classes
-        matched_target = target_mask_np.copy()
-        
-        # For matched pairs, remap GT class to predicted class
-        for pred_idx, gt_idx in zip(pred_indices, gt_indices):
-            pred_class = pred_classes[pred_idx]
-            gt_class = gt_classes[gt_idx]
-            gt_mask = (target_mask_np == gt_class)
-            matched_target[gt_mask] = pred_class
-        
-        # For unmatched GT instances, keep original class (will be penalized)
-        # For unmatched pred instances, they'll be penalized naturally
-        
-        # Convert back to tensor and compute loss
-        matched_target_tensor = torch.from_numpy(matched_target).long().to(device)
-        
-        sample_loss = base_criterion(
-            pred_logits[b:b+1],  # [1, C, H, W]
-            matched_target_tensor.unsqueeze(0)  # [1, H, W]
-        )
-        
-        total_loss += sample_loss
-        n_valid_samples += 1
-    
-    if n_valid_samples == 0:
-        return torch.tensor(0.0, device=device, requires_grad=True)
-    
-    return total_loss / n_valid_samples
 
 
 def dice_loss_binary(pred: torch.Tensor, target: torch.Tensor, smooth: float = 1e-6) -> torch.Tensor:
@@ -729,361 +627,6 @@ def focal_loss_binary(
     return focal_loss.mean()
 
 
-def compute_embedding_smoothness(embeddings: torch.Tensor) -> torch.Tensor:
-    """Compute smoothness loss on embeddings.
-    
-    Encourages spatial coherence, reduces noise in embedding space.
-    Computes L2 norm of gradients in time and space dimensions.
-    
-    Parameters:
-    -----------
-    embeddings : torch.Tensor
-        Embeddings [B, D, H, W] where D is embedding dimension
-    
-    Returns:
-    --------
-    loss : torch.Tensor
-        Smoothness loss (scalar)
-    """
-    B, D, H, W = embeddings.shape
-    
-    # Compute gradients in time (vertical) and space (horizontal) dimensions
-    # Time gradient: difference along dimension 2 (H)
-    time_grad = embeddings[:, :, 1:, :] - embeddings[:, :, :-1, :]  # [B, D, H-1, W]
-    # Space gradient: difference along dimension 3 (W)
-    space_grad = embeddings[:, :, :, 1:] - embeddings[:, :, :, :-1]  # [B, D, H, W-1]
-    
-    # L2 norm of gradients (encourages smoothness)
-    smoothness = (time_grad ** 2).mean() + (space_grad ** 2).mean()
-    
-    return smoothness
-
-
-def compute_variance_loss(pred_embeddings: torch.Tensor, target_mask: torch.Tensor) -> torch.Tensor:
-    """Compute variance loss: pull same-instance pixels together.
-    
-    For each instance in target_mask, compute variance of embeddings.
-    Lower variance = embeddings are closer together (good).
-    
-    Parameters:
-    -----------
-    pred_embeddings : torch.Tensor
-        Predicted embeddings [B, D, H, W]
-    target_mask : torch.Tensor
-        Instance mask [B, H, W] with values 0=background, 1..N=instances
-    
-    Returns:
-    --------
-    loss : torch.Tensor
-        Variance loss (scalar)
-    """
-    B, D, H, W = pred_embeddings.shape
-    device = pred_embeddings.device
-    
-    # Reshape embeddings to [B, H*W, D]
-    embeddings_flat = pred_embeddings.permute(0, 2, 3, 1).reshape(B, H * W, D)
-    target_flat = target_mask.reshape(B, H * W)
-    
-    total_variance = 0.0
-    n_instances = 0
-    
-    for b in range(B):
-        unique_labels = torch.unique(target_flat[b])
-        
-        for label in unique_labels:
-            if label == 0:  # Skip background
-                continue
-            
-            # Get embeddings for this instance
-            instance_mask = (target_flat[b] == label)  # [H*W]
-            if instance_mask.sum() < 2:  # Need at least 2 pixels
-                continue
-            
-            instance_embeddings = embeddings_flat[b, instance_mask]  # [N, D]
-            
-            # Compute mean embedding for this instance
-            mean_embedding = instance_embeddings.mean(dim=0)  # [D]
-            
-            # Compute variance (L2 distance from mean)
-            variance = ((instance_embeddings - mean_embedding.unsqueeze(0)) ** 2).mean()
-            total_variance += variance
-            n_instances += 1
-    
-    if n_instances == 0:
-        return torch.tensor(0.0, device=device, requires_grad=True)
-    
-    return total_variance / n_instances
-
-
-def compute_separation_loss(pred_embeddings: torch.Tensor, target_mask: torch.Tensor, margin: float = 1.0) -> torch.Tensor:
-    """Compute enhanced separation loss: push different instances apart.
-    
-    Uses a stronger penalty function that:
-    1. Applies squared penalty for stronger gradients when instances are close
-    2. Uses exponential penalty for very close instances (distance < margin/2)
-    3. Ensures minimum distance >= margin between all instance pairs
-    
-    Parameters:
-    -----------
-    pred_embeddings : torch.Tensor
-        Predicted embeddings [B, D, H, W]
-    target_mask : torch.Tensor
-        Instance mask [B, H, W] with values 0=background, 1..N=instances
-    margin : float
-        Minimum distance between instance embeddings (default: 1.0)
-    
-    Returns:
-    --------
-    loss : torch.Tensor
-        Separation loss (scalar)
-    """
-    B, D, H, W = pred_embeddings.shape
-    device = pred_embeddings.device
-    
-    # Reshape embeddings to [B, H*W, D]
-    embeddings_flat = pred_embeddings.permute(0, 2, 3, 1).reshape(B, H * W, D)
-    target_flat = target_mask.reshape(B, H * W)
-    
-    total_separation_loss = 0.0
-    n_pairs = 0
-    
-    for b in range(B):
-        unique_labels = torch.unique(target_flat[b])
-        instance_labels = unique_labels[unique_labels != 0]  # Remove background
-        
-        if len(instance_labels) < 2:
-            continue
-        
-        # Compute mean embedding for each instance
-        instance_means = []
-        for label in instance_labels:
-            instance_mask = (target_flat[b] == label)
-            if instance_mask.sum() == 0:
-                continue
-            
-            instance_embeddings = embeddings_flat[b, instance_mask]  # [N, D]
-            mean_embedding = instance_embeddings.mean(dim=0)  # [D]
-            instance_means.append(mean_embedding)
-        
-        if len(instance_means) < 2:
-            continue
-        
-        # Compute pairwise distances
-        for i in range(len(instance_means)):
-            for j in range(i + 1, len(instance_means)):
-                mean_i = instance_means[i]  # [D]
-                mean_j = instance_means[j]  # [D]
-                
-                # L2 distance between means
-                distance = torch.norm(mean_i - mean_j)
-                
-                # Enhanced separation loss with stronger penalty
-                if distance < margin:
-                    # When distance < margin, apply penalty
-                    gap = margin - distance
-                    
-                    # For very close instances (distance < margin/2), use exponential penalty
-                    # This creates very strong gradients when instances are too close
-                    if distance < margin / 2:
-                        # Exponential penalty: exp(2 * gap / margin) - 1
-                        # This gives much stronger penalty for very close instances
-                        separation_loss = torch.exp(2.0 * gap / margin) - 1.0
-                    else:
-                        # For moderately close instances, use squared penalty
-                        # This gives stronger gradients than linear hinge loss
-                        separation_loss = gap ** 2
-                else:
-                    # Instances are far enough apart, no penalty
-                    separation_loss = torch.tensor(0.0, device=device)
-                
-                total_separation_loss += separation_loss
-                n_pairs += 1
-    
-    if n_pairs == 0:
-        return torch.tensor(0.0, device=device, requires_grad=True)
-    
-    return total_separation_loss / n_pairs
-
-
-def compute_background_loss(pred_embeddings: torch.Tensor, target_mask: torch.Tensor, 
-                            background_embedding: torch.Tensor = None) -> torch.Tensor:
-    """Compute background loss: pull background pixels to a fixed embedding.
-    
-    Parameters:
-    -----------
-    pred_embeddings : torch.Tensor
-        Predicted embeddings [B, D, H, W]
-    target_mask : torch.Tensor
-        Instance mask [B, H, W] with values 0=background, 1..N=instances
-    background_embedding : torch.Tensor, optional
-        Target embedding for background [D]. If None, uses zero vector.
-    
-    Returns:
-    --------
-    loss : torch.Tensor
-        Background loss (scalar)
-    """
-    B, D, H, W = pred_embeddings.shape
-    device = pred_embeddings.device
-    
-    if background_embedding is None:
-        background_embedding = torch.zeros(D, device=device)
-    else:
-        background_embedding = background_embedding.to(device)
-    
-    # Reshape embeddings to [B, H*W, D]
-    embeddings_flat = pred_embeddings.permute(0, 2, 3, 1).reshape(B, H * W, D)
-    target_flat = target_mask.reshape(B, H * W)
-    
-    total_bg_loss = pred_embeddings.new_tensor(0.0)
-    total_bg_pixels = 0
-    
-    for b in range(B):
-        bg_mask = (target_flat[b] == 0)  # Background pixels
-        if bg_mask.sum() == 0:
-            continue
-        
-        bg_embeddings = embeddings_flat[b, bg_mask]  # [N, D]
-        n_pixels = bg_mask.sum().item()
-        
-        # L2 distance from background embedding
-        bg_loss = ((bg_embeddings - background_embedding.unsqueeze(0)) ** 2).mean()
-        total_bg_loss += bg_loss * n_pixels
-        total_bg_pixels += n_pixels
-    
-    if total_bg_pixels == 0:
-        return torch.tensor(0.0, device=device, requires_grad=True)
-    
-    return total_bg_loss / total_bg_pixels
-
-
-def compute_instance_norm_loss(pred_embeddings: torch.Tensor, target_mask: torch.Tensor,
-                               target_norm: float = 1.0) -> torch.Tensor:
-    """Encourage foreground embeddings to maintain approximately unit norm."""
-    B, D, H, W = pred_embeddings.shape
-    device = pred_embeddings.device
-    
-    embeddings_flat = pred_embeddings.permute(0, 2, 3, 1).reshape(B, H * W, D)
-    target_flat = target_mask.reshape(B, H * W)
-    
-    total_loss = pred_embeddings.new_tensor(0.0)
-    total_pixels = 0
-    
-    for b in range(B):
-        instance_mask = target_flat[b] > 0
-        if instance_mask.sum() == 0:
-            continue
-        inst_embeddings = embeddings_flat[b, instance_mask]
-        norms = torch.norm(inst_embeddings, dim=1)
-        loss = ((norms - target_norm) ** 2).mean()
-        n_pixels = instance_mask.sum().item()
-        total_loss += loss * n_pixels
-        total_pixels += n_pixels
-    
-    if total_pixels == 0:
-        return torch.tensor(0.0, device=device, requires_grad=True)
-    
-    return total_loss / total_pixels
-
-
-
-
-def embedding_loss(pred_embeddings: torch.Tensor, target_mask: torch.Tensor,
-                   var_weight: float = 1.0, sep_weight: float = 0.5, bg_weight: float = 0.5,
-                   smoothness_weight: float = 0.1, reg_weight: float = 0.01,
-                   separation_margin: float = 1.0,
-                   norm_weight: float = 0.2) -> torch.Tensor:
-    """
-    Enhanced embedding loss with smoothness regularization for noise robustness.
-    
-    Parameters:
-    -----------
-    pred_embeddings : torch.Tensor
-        Predicted embeddings [B, D, H, W]
-    target_mask : torch.Tensor
-        Instance mask [B, H, W] with values 0=background, 1..N=instances
-    var_weight : float
-        Weight for variance loss (pull same-instance together)
-    sep_weight : float
-        Weight for separation loss (push different instances apart)
-    bg_weight : float
-        Weight for background loss
-    smoothness_weight : float
-        Weight for smoothness loss (reduces noise)
-    reg_weight : float
-        Weight for L2 regularization
-    separation_margin : float
-        Minimum distance between instance embeddings
-    
-    Returns:
-    --------
-    loss : torch.Tensor
-        Total embedding loss (scalar)
-    """
-    # 1. Variance loss (pull same-instance together)
-    var_loss = compute_variance_loss(pred_embeddings, target_mask)
-    
-    # 2. Separation loss (push different instances apart)
-    sep_loss = compute_separation_loss(pred_embeddings, target_mask, margin=separation_margin)
-    
-    # 3. Background loss
-    bg_loss = compute_background_loss(pred_embeddings, target_mask)
-    
-    # 4. Instance norm consistency (push embeddings away from background norm)
-    norm_loss = compute_instance_norm_loss(pred_embeddings, target_mask)
-    
-    # 5. Smoothness loss (reduces noise)
-    smoothness_loss = compute_embedding_smoothness(pred_embeddings)
-    
-    # 6. L2 regularization
-    reg_loss = (pred_embeddings ** 2).mean()
-    
-    total_loss = (var_weight * var_loss + 
-                  sep_weight * sep_loss + 
-                  bg_weight * bg_loss +
-                  norm_weight * norm_loss +
-                  smoothness_weight * smoothness_loss +
-                  reg_weight * reg_loss)
-    
-    return total_loss
-
-
-def entropy_regularization_loss(pred_logits: torch.Tensor) -> torch.Tensor:
-    """Entropy regularization loss (standard approach for penalizing uncertainty).
-    
-    Penalizes high entropy (uncertain predictions) in the probability distribution.
-    This encourages confident predictions without specifically targeting 0.5.
-    
-    Entropy for binary: H(p) = -p*log(p) - (1-p)*log(1-p)
-    - Maximum entropy at p=0.5 (most uncertain)
-    - Minimum entropy at p=0 or p=1 (most certain)
-    
-    Parameters:
-    -----------
-    pred_logits : torch.Tensor
-        Binary logits [B, 1, H, W] or [B, H, W]
-    
-    Returns:
-    --------
-    loss : torch.Tensor
-        Entropy regularization loss (scalar)
-    """
-    if pred_logits.dim() == 4:
-        pred_logits = pred_logits.squeeze(1)  # [B, H, W]
-    
-    # Convert logits to probabilities
-    pred_probs = torch.sigmoid(pred_logits)  # [B, H, W], values in [0, 1]
-    
-    # Compute binary entropy: -p*log(p) - (1-p)*log(1-p)
-    # Add small epsilon to avoid log(0)
-    eps = 1e-8
-    entropy = -(pred_probs * torch.log(pred_probs + eps) + 
-                (1 - pred_probs) * torch.log(1 - pred_probs + eps))
-    
-    # Return mean entropy (higher entropy = more uncertain = higher penalty)
-    return entropy.mean()
-
-
 def _find_latest_checkpoint(checkpoint_dir: str) -> Optional[str]:
     """Find the latest checkpoint file in the checkpoint directory.
     
@@ -1137,7 +680,6 @@ def train_multitask_model(
         dropout=config.dropout,
         encoder_dropout=config.encoder_dropout,
         decoder_dropout=config.decoder_dropout,
-        embedding_dim=config.embedding_dim
     ).to(config.device)
     
     # Resume from checkpoint if specified or auto-detect
@@ -1215,12 +757,17 @@ def train_multitask_model(
     else:
         raise ValueError(f"Unknown denoise loss: {config.denoise_loss}")
     
-    # Embedding loss (replaces segmentation loss)
-    print(f"  Using embedding-based segmentation")
-    print(f"  Embedding dimension: {config.embedding_dim}")
-    print(f"  Embedding loss weights: var={config.embedding_var_weight}, "
-          f"sep={config.embedding_sep_weight}, bg={config.embedding_bg_weight}, "
-          f"smooth={config.embedding_smoothness_weight}, reg={config.embedding_reg_weight}")
+    # Heatmap loss
+    if config.heatmap_loss == "bce":
+        pos_weight = None
+        if config.heatmap_pos_weight is not None:
+            pos_weight = torch.tensor(config.heatmap_pos_weight, device=config.device)
+        heatmap_criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    elif config.heatmap_loss == "mse":
+        heatmap_criterion = nn.MSELoss()
+    else:
+        raise ValueError(f"Unknown heatmap loss: {config.heatmap_loss}")
+    print(f"  Heatmap loss: {config.heatmap_loss} (weight: {config.heatmap_loss_weight})")
     
     # Optimizer with weight decay (L2 regularization)
     optimizer = optim.Adam(
@@ -1264,7 +811,9 @@ def train_multitask_model(
     print(f"  Batch size: {config.batch_size}")
     print(f"  Learning rate: {config.learning_rate}")
     print(f"  Denoise loss: {config.denoise_loss} (weight: {config.denoise_loss_weight})")
-    print(f"  Embedding loss (weight: {config.embedding_loss_weight})")
+    print(f"  Heatmap loss (weight: {config.heatmap_loss_weight})")
+    print(f"  Channel separation weight: {config.channel_separation_weight}")
+    print(f"  Hungarian matching: {config.use_hungarian_matching}")
     print(f"  Weight decay (L2): {config.weight_decay}")
     if config.encoder_dropout > 0:
         print(f"  Dropout (encoder): {config.encoder_dropout}")
@@ -1274,7 +823,11 @@ def train_multitask_model(
         print(f"  Dropout (decoder): {config.decoder_dropout}")
     if config.label_smoothing > 0:
         print(f"  Label smoothing: {config.label_smoothing}")
-    print(f"  Dataset size: {len(dataset)}")
+    if config.auto_balance_losses:
+        print(
+            f"  Auto loss balancing enabled (scale clamp: "
+            f"{config.balance_min_scale}-{config.balance_max_scale})"
+        )
     if config.checkpoint_dir:
         os.makedirs(config.checkpoint_dir, exist_ok=True)
         print(f"  Checkpoint directory: {config.checkpoint_dir}")
@@ -1284,7 +837,8 @@ def train_multitask_model(
     for epoch in range(start_epoch, config.epochs):
         epoch_start_time = time.time()
         epoch_denoise_loss = 0.0
-        epoch_segment_loss = 0.0
+        epoch_heatmap_loss = 0.0
+        epoch_separation_loss = 0.0
         epoch_total_loss = 0.0
         batch_count = 0
         
@@ -1296,46 +850,54 @@ def train_multitask_model(
             unit="batch"
         )
         
-        for batch_idx, (noisy, true_noise, true_mask) in pbar:
+        for batch_idx, (noisy, true_noise, true_heatmaps) in pbar:
             noisy = noisy.to(config.device)
             true_noise = true_noise.to(config.device)
-            true_mask = true_mask.to(config.device)  # Instance mask: [B, H, W] with values 0=bg, 1..N=instances
+            true_heatmaps = true_heatmaps.to(config.device)  # [B, C, H, W] heatmaps
             
             optimizer.zero_grad()
             
-            # Forward pass: get denoising and embeddings
-            pred_noise, pred_embeddings = model(noisy)  # embeddings: [B, D, H, W]
+            # Forward pass: get denoising and per-particle heatmaps
+            pred_noise, pred_heatmaps = model(noisy)
             
             # Compute losses
             denoise_loss = denoise_criterion(pred_noise, true_noise)
             
-            # Embedding loss (replaces segmentation loss)
-            embedding_loss_val = embedding_loss(
-                pred_embeddings,
-                true_mask,
-                var_weight=config.embedding_var_weight,
-                sep_weight=config.embedding_sep_weight,
-                bg_weight=config.embedding_bg_weight,
-                smoothness_weight=config.embedding_smoothness_weight,
-                reg_weight=config.embedding_reg_weight,
-                separation_margin=config.embedding_separation_margin
-            )
+            # Heatmap loss
+            heatmap_targets = true_heatmaps
+            if config.use_hungarian_matching:
+                heatmap_targets = align_heatmaps_with_hungarian(pred_heatmaps, true_heatmaps)
+            heatmap_loss_val = heatmap_criterion(pred_heatmaps, heatmap_targets)
             
-            # Combined loss
+            # Adaptive weighting to keep heatmap loss from lagging behind
+            adaptive_denoise_weight = config.denoise_loss_weight
+            if config.auto_balance_losses:
+                with torch.no_grad():
+                    ratio = (heatmap_loss_val.detach() + 1e-6) / (denoise_loss.detach() + 1e-6)
+                    ratio = torch.clamp(
+                        ratio,
+                        min=config.balance_min_scale,
+                        max=config.balance_max_scale,
+                    )
+                    adaptive_denoise_weight = adaptive_denoise_weight * ratio.item()
+            separation_loss_val = pred_heatmaps.new_tensor(0.0)
+            if config.channel_separation_weight > 0.0:
+                separation_loss_val = channel_separation_loss(pred_heatmaps)
             total_loss = (
-                config.denoise_loss_weight * denoise_loss +
-                config.embedding_loss_weight * embedding_loss_val
+                adaptive_denoise_weight * denoise_loss +
+                config.heatmap_loss_weight * heatmap_loss_val +
+                config.channel_separation_weight * separation_loss_val
             )
             
             # Backward pass
             total_loss.backward()
             
-            # Monitor gradients for embedding head (diagnostic)
-            if batch_idx == 0 and epoch % 2 == 0:  # Print every 2 epochs, first batch
-                emb_head_grad = model.embedding_head.weight.grad
-                if emb_head_grad is not None:
-                    grad_norm = emb_head_grad.norm().item()
-                    print(f"\n  [Debug] Embedding head grad norm: {grad_norm:.6f}")
+            # Optional gradient diagnostics for locator head
+            if batch_idx == 0 and epoch % 2 == 0:
+                head_grad = model.segmenter.heatmap_head.weight.grad
+                if head_grad is not None:
+                    grad_norm = head_grad.norm().item()
+                    print(f"\n  [Debug] Heatmap head grad norm: {grad_norm:.6f}")
             
             # Gradient clipping
             if config.use_gradient_clipping:
@@ -1344,7 +906,8 @@ def train_multitask_model(
             optimizer.step()
             
             epoch_denoise_loss += denoise_loss.item()
-            epoch_segment_loss += embedding_loss_val.item()
+            epoch_heatmap_loss += heatmap_loss_val.item()
+            epoch_separation_loss += separation_loss_val.item()
             epoch_total_loss += total_loss.item()
             batch_count += 1
             
@@ -1352,7 +915,8 @@ def train_multitask_model(
             current_lr = optimizer.param_groups[0]['lr']
             pbar.set_postfix({
                 'denoise': f'{denoise_loss.item():.4f}',
-                'embed': f'{embedding_loss_val.item():.4f}',
+                'heatmap': f'{heatmap_loss_val.item():.4f}',
+                'separation': f'{separation_loss_val.item():.4f}',
                 'lr': f'{current_lr:.2e}',
                 'total': f'{total_loss.item():.4f}'
             })
@@ -1360,14 +924,16 @@ def train_multitask_model(
         pbar.close()
         
         avg_denoise_loss = epoch_denoise_loss / batch_count
-        avg_segment_loss = epoch_segment_loss / batch_count
+        avg_heatmap_loss = epoch_heatmap_loss / batch_count
+        avg_separation_loss = epoch_separation_loss / batch_count
         avg_total_loss = epoch_total_loss / batch_count
         epoch_time = time.time() - epoch_start_time
-        
+    
         print(f"Epoch {epoch + 1}/{config.epochs} completed: "
               f"Total={avg_total_loss:.6f}, "
               f"Denoise={avg_denoise_loss:.6f}, "
-              f"Embedding={avg_segment_loss:.6f}, "
+              f"Heatmap={avg_heatmap_loss:.6f}, "
+              f"Separation={avg_separation_loss:.6f}, "
               f"Time={epoch_time:.2f}s")
         
         # Save checkpoint if configured
@@ -1418,7 +984,7 @@ def save_multitask_model(model: MultiTaskUNet, path: str) -> None:
     print(f"Multi-task model saved to {path}")
 
 
-def load_multitask_model(path: str, device: str = None, max_tracks: int = 3, embedding_dim: int = 2) -> MultiTaskUNet:
+def load_multitask_model(path: str, device: str = None, max_tracks: int = 3) -> MultiTaskUNet:
     """Load multi-task model.
     
     Handles both formats:
@@ -1438,7 +1004,6 @@ def load_multitask_model(path: str, device: str = None, max_tracks: int = 3, emb
         dropout=0.0,
         encoder_dropout=0.0,
         decoder_dropout=0.0,
-        embedding_dim=embedding_dim
     ).to(device)
     
     # Try loading with weights_only first (for weights-only files)
@@ -1488,19 +1053,19 @@ def denoise_and_segment_chunked(
     model: MultiTaskUNet,
     kymograph: np.ndarray,
     device: str = None,
-    chunk_size: int = 512,
-    overlap: int = 64,
+    chunk_size: int = 16,
+    overlap: int = 8,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Apply multi-task model to kymograph with chunking.
     
-    Returns denoised kymograph and embeddings (no clustering).
+    Returns denoised kymograph and per-particle heatmaps (no clustering).
     
     Returns:
     --------
     denoised : np.ndarray
         Denoised kymograph, shape (time, width), dtype float32, values in [0, 1]
-    embeddings : np.ndarray
-        Embeddings, shape (time, width, embedding_dim), dtype float32
+    heatmaps : np.ndarray
+        Heatmaps, shape (time, width, max_tracks), dtype float32
     """
     if device is None:
         device = _default_device()
@@ -1512,26 +1077,26 @@ def denoise_and_segment_chunked(
     if time_len <= chunk_size:
         with torch.no_grad():
             input_tensor = torch.from_numpy(kymograph).unsqueeze(0).unsqueeze(0).float().to(device)
-            pred_noise, pred_embeddings = model(input_tensor)
+            pred_noise, pred_heatmaps = model(input_tensor)
             denoised = torch.clamp(input_tensor - pred_noise, 0.0, 1.0).squeeze().cpu().numpy()
             
-            # Convert embeddings: [B, D, T, W] -> [T, W, D]
-            embeddings_np = pred_embeddings.squeeze().permute(1, 2, 0).cpu().numpy()
+            # Convert heatmaps: [B, C, T, W] -> [T, W, C]
+            heatmaps_np = pred_heatmaps.squeeze().permute(1, 2, 0).cpu().numpy()
             
             # Clear GPU memory
-            del input_tensor, pred_noise, pred_embeddings
+            del input_tensor, pred_noise, pred_heatmaps
             if device.startswith('cuda'):
                 torch.cuda.empty_cache()
             
-        return denoised, embeddings_np
+        return denoised, heatmaps_np
     
     # Process in chunks with overlap
     denoised = np.zeros((time_len, width), dtype=np.float32)
     weights = np.zeros((time_len, width), dtype=np.float32)
     
-    # Get embedding dimension from first chunk
-    embedding_dim = None
-    embeddings_all = None
+    # Get heatmap channel count from first chunk
+    heatmap_channels = None
+    heatmaps_all = None
     
     # Create window function for blending
     window = np.ones(chunk_size)
@@ -1554,52 +1119,52 @@ def denoise_and_segment_chunked(
             
             # Process chunk
             chunk_tensor = torch.from_numpy(padded_chunk).unsqueeze(0).unsqueeze(0).float().to(device)
-            pred_noise_chunk, pred_embeddings_chunk = model(chunk_tensor)
+            pred_noise_chunk, pred_heatmaps_chunk = model(chunk_tensor)
             denoised_chunk = torch.clamp(chunk_tensor - pred_noise_chunk, 0.0, 1.0).squeeze().cpu().numpy()
             
-            # Get embeddings: [B, D, T, W] -> [T, W, D]
-            embeddings_chunk = pred_embeddings_chunk.squeeze().permute(1, 2, 0).cpu().numpy()
+            # Get heatmaps: [B, C, T, W] -> [T, W, C]
+            heatmaps_chunk = pred_heatmaps_chunk.squeeze().permute(1, 2, 0).cpu().numpy()
             
             # Clear GPU memory immediately
-            del chunk_tensor, pred_noise_chunk, pred_embeddings_chunk
+            del chunk_tensor, pred_noise_chunk, pred_heatmaps_chunk
             if device.startswith('cuda'):
                 torch.cuda.empty_cache()
             
             # Extract actual size (remove padding)
             actual_len = end - start
             denoised_chunk = denoised_chunk[:actual_len]
-            embeddings_chunk = embeddings_chunk[:actual_len]
+            heatmaps_chunk = heatmaps_chunk[:actual_len]
             window_chunk = window[:actual_len]
             
-            # Initialize embeddings array
-            if embeddings_all is None:
-                embedding_dim = embeddings_chunk.shape[2]
-                embeddings_all = np.zeros((time_len, width, embedding_dim), dtype=np.float32)
+            # Initialize heatmap array
+            if heatmaps_all is None:
+                heatmap_channels = heatmaps_chunk.shape[2]
+                heatmaps_all = np.zeros((time_len, width, heatmap_channels), dtype=np.float32)
             
-            # Blend denoised and embeddings with window
+            # Blend denoised and heatmaps with window
             weight_chunk = window_chunk[:, np.newaxis]
             denoised[start:end] += denoised_chunk * weight_chunk
-            embeddings_all[start:end] += embeddings_chunk * weight_chunk[:, :, np.newaxis]
+            heatmaps_all[start:end] += heatmaps_chunk * weight_chunk[:, :, np.newaxis]
             weights[start:end] += weight_chunk
             
             # Clear chunk data
-            del denoised_chunk, embeddings_chunk
+            del denoised_chunk, heatmaps_chunk
             
             # Move to next chunk
             start += chunk_size - overlap
     
-    # Normalize denoised and embeddings by weights
+    # Normalize denoised and heatmaps by weights
     denoised = np.divide(denoised, weights, out=np.zeros_like(denoised), where=weights > 0)
     weights_expanded = weights[:, :, np.newaxis]
-    embeddings_all = np.divide(embeddings_all, weights_expanded, 
-                              out=np.zeros_like(embeddings_all), where=weights_expanded > 0)
+    heatmaps_all = np.divide(heatmaps_all, weights_expanded, 
+                              out=np.zeros_like(heatmaps_all), where=weights_expanded > 0)
     del weights, weights_expanded
     
     # Clear GPU cache
     if device.startswith('cuda'):
         torch.cuda.empty_cache()
     
-    return denoised, embeddings_all
+    return denoised, heatmaps_all
 
 
 if __name__ == "__main__":
@@ -1631,7 +1196,7 @@ if __name__ == "__main__":
     # Create dataset
     print("Creating multi-task dataset...")
     dataset = MultiTaskDataset(
-        n_samples=1024,
+        n_samples=4096,
         length=512,
         width=512,
         radii_nm=(3.0, 70.0),  # Extended to match test data (test shows up to ~68 nm)
@@ -1640,6 +1205,13 @@ if __name__ == "__main__":
         multi_trajectory_prob=1.0,  # 100% multi-particle examples
         max_trajectories=3,
         mask_peak_width_samples=2.0,
+        window_length=16,
+    )
+    print(f"  Total samples: {len(dataset)}")
+    sample_noisy, _, _ = dataset[0]
+    print(
+        f"  Sample tensor shape: channels={sample_noisy.shape[0]}, "
+        f"time={sample_noisy.shape[1]}, space={sample_noisy.shape[2]}"
     )
     
     checkpoint_dir = "models/checkpoints"
@@ -1652,19 +1224,13 @@ if __name__ == "__main__":
     # Training config
     config = MultiTaskConfig(
         epochs=2,
-        batch_size=8,
+        batch_size=32,
         learning_rate=1.5e-3,  # Slightly reduced from 2e-3 for more stable training
         denoise_loss_weight=1.0,
-        embedding_loss_weight=2.0,  # Weight for embedding loss
+        heatmap_loss_weight=2.0,
         denoise_loss="l2",
-        # Embedding loss parameters
-        embedding_var_weight=1.0,  # Pull same-instance together
-        embedding_sep_weight=1.5,  # Push different instances apart - ENHANCED (was 0.5)
-        embedding_bg_weight=0.5,  # Background loss
-        embedding_smoothness_weight=0.1,  # Smoothness regularization (reduces noise)
-        embedding_reg_weight=0.01,  # L2 regularization
-        embedding_separation_margin=2.0,  # Minimum distance between instances - ENHANCED (was 1.0)
-        embedding_dim=2,  # Embedding dimension (2D like CellPose)
+        heatmap_loss="bce",
+        heatmap_pos_weight=None,
         weight_decay=1e-4,  # L2 regularization to prevent overfitting
         dropout=0.1,  # Dropout in bottleneck
         encoder_dropout=0.1,  # Dropout in encoder layers (commonly used in U-Nets/DDPM)

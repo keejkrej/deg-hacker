@@ -52,7 +52,7 @@ class TestSingleParticlePipeline:
             
             from single_particle_unet import denoise_kymograph_chunked
             denoised = denoise_kymograph_chunked(
-                model, simulation.kymograph_noisy, chunk_size=128, overlap=32
+                model, simulation.kymograph_noisy, chunk_size=16, overlap=8
             )
             
             assert denoised.shape == simulation.kymograph_noisy.shape
@@ -99,7 +99,7 @@ class TestMultiParticlePipeline:
         # Denoise
         from single_particle_unet import denoise_kymograph_chunked
         denoised = denoise_kymograph_chunked(
-            model, simulation.kymograph_noisy, chunk_size=128, overlap=32
+            model, simulation.kymograph_noisy, chunk_size=16, overlap=8
         )
         
         # Track particles
