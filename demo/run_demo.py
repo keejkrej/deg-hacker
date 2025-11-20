@@ -38,7 +38,7 @@ def run_classical_pipeline(kymograph_noisy):
         kymograph_noisy,
         median_kernel=(11, 11),
         threshold_mode="otsu",
-        min_component_size=8,
+        min_component_size=50,  # Increased from 8 to filter out small noise regions
     )
     
     # Extract trajectories
