@@ -13,6 +13,19 @@ from kymo_tracker.deeplearning.training.multitask import (
     save_multitask_model,
     load_multitask_model,
 )
+from kymo_tracker.deeplearning.training.config import (
+    DEFAULT_EPOCHS,
+    DEFAULT_SAMPLES,
+    DEFAULT_BATCH_SIZE,
+    DEFAULT_MASK_PEAK_WIDTH_SAMPLES,
+    DEFAULT_WINDOW_LENGTH,
+    DEFAULT_WIDTH,
+    DEFAULT_RADII_NM,
+    DEFAULT_CONTRAST,
+    DEFAULT_NOISE_LEVEL,
+    DEFAULT_MULTI_TRAJECTORY_PROB,
+    DEFAULT_MAX_TRAJECTORIES,
+)
 from kymo_tracker.deeplearning.predict import (
     process_slice_independently,
     link_trajectories_across_slices,
@@ -38,14 +51,14 @@ def train(
 
     dataset = MultiTaskDataset(
         n_samples=samples,
-        length=512,
-        width=512,
-        radii_nm=(3.0, 70.0),
-        contrast=(0.5, 1.1),
-        noise_level=(0.08, 0.8),
-        multi_trajectory_prob=1.0,
-        max_trajectories=3,
-        mask_peak_width_samples=2.0,
+        length=DEFAULT_WIDTH,
+        width=DEFAULT_WIDTH,
+        radii_nm=DEFAULT_RADII_NM,
+        contrast=DEFAULT_CONTRAST,
+        noise_level=DEFAULT_NOISE_LEVEL,
+        multi_trajectory_prob=DEFAULT_MULTI_TRAJECTORY_PROB,
+        max_trajectories=DEFAULT_MAX_TRAJECTORIES,
+        mask_peak_width_samples=DEFAULT_MASK_PEAK_WIDTH_SAMPLES,
         window_length=window_length,
     )
     typer.echo(f"Dataset created with {len(dataset)} samples of shape 512x{window_length}.")

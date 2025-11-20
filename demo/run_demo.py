@@ -16,6 +16,17 @@ from kymo_tracker.utils.helpers import (
     find_max_subpixel,
 )
 from kymo_tracker.classical.pipeline import classical_median_threshold_tracking
+from kymo_tracker.deeplearning.training.config import (
+    DEFAULT_EPOCHS,
+    DEFAULT_MASK_PEAK_WIDTH_SAMPLES,
+    DEFAULT_WINDOW_LENGTH,
+    DEFAULT_WIDTH,
+    DEFAULT_RADII_NM,
+    DEFAULT_CONTRAST,
+    DEFAULT_NOISE_LEVEL,
+    DEFAULT_MULTI_TRAJECTORY_PROB,
+    DEFAULT_MAX_TRAJECTORIES,
+)
 from kymo_tracker.deeplearning.training.multitask import (
     MultiTaskConfig,
     train_multitask_model,
@@ -280,19 +291,19 @@ def main():
         # Lightweight training for demo
         dataset = MultiTaskDataset(
             n_samples=1024,  # Reduced for faster training
-            window_length=16,
-            length=512,
-            width=512,
-            radii_nm=(3.0, 70.0),
-            contrast=(0.5, 1.1),
-            noise_level=(0.08, 0.8),
-            multi_trajectory_prob=1.0,
-            max_trajectories=3,
-            mask_peak_width_samples=10.0,
+            window_length=DEFAULT_WINDOW_LENGTH,
+            length=DEFAULT_WIDTH,
+            width=DEFAULT_WIDTH,
+            radii_nm=DEFAULT_RADII_NM,
+            contrast=DEFAULT_CONTRAST,
+            noise_level=DEFAULT_NOISE_LEVEL,
+            multi_trajectory_prob=DEFAULT_MULTI_TRAJECTORY_PROB,
+            max_trajectories=DEFAULT_MAX_TRAJECTORIES,
+            mask_peak_width_samples=DEFAULT_MASK_PEAK_WIDTH_SAMPLES,
         )
         
         config = MultiTaskConfig(
-            epochs=15,
+            epochs=DEFAULT_EPOCHS,
             batch_size=16,
             learning_rate=1.5e-3,
             checkpoint_dir=str(checkpoint_dir),

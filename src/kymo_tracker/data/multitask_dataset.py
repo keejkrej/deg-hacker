@@ -125,6 +125,43 @@ class MultiTaskDataset(Dataset):
         # Compute true noise
         true_noise_window = noisy_window - gt_window
         
+        # Extract actual widths from ground truth kymograph
+        # For each trajectory, compute the width from the Gaussian profile in gt_window
+        actual_widths = np.full((n_trajectories, self.window_length), np.nan, dtype=np.float32)
+        for i in range(n_trajectories):
+            for t in range(self.window_length):
+                center_px = paths_window[i, t]
+                if np.isnan(center_px) or center_px < 0 or center_px >= self.width:
+                    continue
+                
+                # Extract the 1D profile at time t
+                profile = gt_window[t, :]
+                
+                # Find the peak value at the center
+                center_idx = int(np.round(center_px))
+                center_idx = np.clip(center_idx, 0, self.width - 1)
+                peak_value = profile[center_idx]
+                
+                if peak_value <= 0:
+                    continue
+                
+                # Find width at half maximum (FWHM) or at a threshold
+                # For Gaussian: FWHM ≈ 2.355 * sigma, but we'll measure it directly
+                threshold = peak_value * 0.5  # Half maximum
+                
+                # Find left and right boundaries
+                left_idx = center_idx
+                while left_idx > 0 and profile[left_idx] > threshold:
+                    left_idx -= 1
+                right_idx = center_idx
+                while right_idx < self.width - 1 and profile[right_idx] > threshold:
+                    right_idx += 1
+                
+                # Width is the distance between boundaries
+                width_px = right_idx - left_idx
+                if width_px > 0:
+                    actual_widths[i, t] = width_px
+        
         # Prepare target positions and widths
         # Shape: (max_trajectories, window_length)
         # NOTE: Model outputs normalized values (centers: [0,1], widths: normalized by width)
@@ -136,8 +173,14 @@ class MultiTaskDataset(Dataset):
         for i in range(n_trajectories):
             # Normalize positions: pixel [0, width-1] -> normalized [0, 1]
             target_pos[i, :] = paths_window[i, :] / (self.width - 1)
+            # Use actual widths from simulation, fallback to fixed width if not available
+            widths_to_use = actual_widths[i, :]
+            # Replace NaN with fallback width
+            widths_to_use = np.where(np.isnan(widths_to_use), 
+                                    self.mask_peak_width_samples, 
+                                    widths_to_use)
             # Normalize widths: pixels -> normalized (divide by width)
-            target_width[i, :] = self.mask_peak_width_samples / self.width
+            target_width[i, :] = widths_to_use / self.width
             valid_mask[i, :] = 1.0
         
         # Convert to tensors and add channel dimension
