@@ -39,9 +39,9 @@ class MultiTaskDataset(Dataset):
         
         Args:
             n_samples: Number of samples to generate
-            length: Spatial dimension (height) of kymograph
-            width: Spatial dimension (width) of kymograph
-            window_length: Temporal window length for each sample
+            length: Unused (kept for backward compatibility)
+            width: Spatial dimension (width) of kymograph in pixels
+            window_length: Temporal window length (time frames) for each sample
             radii_nm: Particle radius range in nanometers (single value or tuple)
             contrast: Contrast range (single value or tuple)
             noise_level: Noise level range (single value or tuple)
@@ -51,7 +51,6 @@ class MultiTaskDataset(Dataset):
             seed: Random seed for reproducibility
         """
         self.n_samples = n_samples
-        self.length = length
         self.width = width
         self.window_length = window_length
         self.max_trajectories = max_trajectories
@@ -108,10 +107,10 @@ class MultiTaskDataset(Dataset):
         # Generate diffusion coefficients
         diffusions = [get_diffusion_coefficient(r) for r in radii]
         
-        # Generate full kymograph
-        noisy_full, gt_full, paths_full = generate_kymograph(
-            length=self.length,
-            width=self.width,
+        # Generate kymograph directly at window size (16 time frames, 512 spatial pixels)
+        noisy_window, gt_window, paths_window = generate_kymograph(
+            length=self.window_length,  # Generate 16 time frames directly
+            width=self.width,  # 512 spatial pixels
             diffusion=diffusions if len(diffusions) > 1 else diffusions[0],
             contrast=contrasts if len(contrasts) > 1 else contrasts[0],
             noise_level=noise_level,
@@ -121,17 +120,7 @@ class MultiTaskDataset(Dataset):
             seed=None,  # Use random seed
         )
         
-        # Extract random temporal window
-        if self.length > self.window_length:
-            t_start = np.random.randint(0, self.length - self.window_length + 1)
-        else:
-            t_start = 0
-            self.window_length = self.length
-        
-        t_end = t_start + self.window_length
-        noisy_window = noisy_full[t_start:t_end, :]
-        gt_window = gt_full[t_start:t_end, :]
-        paths_window = paths_full[:, t_start:t_end]  # (n_trajectories, window_length)
+        # paths_window is already (n_trajectories, window_length)
         
         # Compute true noise
         true_noise_window = noisy_window - gt_window
