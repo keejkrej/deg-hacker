@@ -82,20 +82,17 @@ def visualize_comparison(
             if valid.any():
                 ax.plot(np.arange(T)[valid], traj[valid], 
                        color=colors[i % len(colors)], linewidth=2, 
-                       label=f'Track {i+1}', alpha=0.8)
+                       alpha=0.8)
                 has_trajectories = True
     if true_paths:
         for i, true_path in enumerate(true_paths):
             if true_path is not None and len(true_path) > 0:
                 true_path = np.asarray(true_path, dtype=np.float64)
                 ax.plot(true_path, color=colors[i % len(colors)], 
-                       linestyle='--', linewidth=1.5, alpha=0.5, 
-                       label=f'True {i+1}' if i < 2 else None)
+                       linestyle='--', linewidth=1.5, alpha=0.5)
     ax.set_title('4. Predicted Trajectories', fontweight='bold')
     ax.set_xlabel('Time')
     ax.set_ylabel('Position')
-    if has_trajectories or true_paths:
-        ax.legend(loc='upper right', fontsize=8)
     
     # Row 2: Deep learning approach
     # 1. Noisy input (same)
@@ -138,20 +135,17 @@ def visualize_comparison(
             if valid.any():
                 ax.plot(np.arange(T)[valid], traj[valid], 
                        color=colors[i % len(colors)], linewidth=2, 
-                       label=f'Track {i+1}', alpha=0.8)
+                       alpha=0.8)
                 has_trajectories = True
     if true_paths:
         for i, true_path in enumerate(true_paths):
             if true_path is not None and len(true_path) > 0:
                 true_path = np.asarray(true_path, dtype=np.float64)
                 ax.plot(true_path, color=colors[i % len(colors)], 
-                       linestyle='--', linewidth=1.5, alpha=0.5, 
-                       label=f'True {i+1}' if i < 2 else None)
+                       linestyle='--', linewidth=1.5, alpha=0.5)
     ax.set_title('4. Predicted Trajectories', fontweight='bold')
     ax.set_xlabel('Time')
     ax.set_ylabel('Position')
-    if has_trajectories or true_paths:
-        ax.legend(loc='upper right', fontsize=8)
     
     plt.tight_layout()
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
