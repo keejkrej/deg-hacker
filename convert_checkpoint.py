@@ -11,7 +11,7 @@ import sys
 import torch
 from pathlib import Path
 
-from kymo_tracker.training.multitask import MultiTaskConfig
+from kymo_tracker.deeplearning.training.multitask import MultiTaskConfig
 
 def convert_checkpoint_to_model(checkpoint_path: str, output_path: str):
     """Convert checkpoint file to model file."""

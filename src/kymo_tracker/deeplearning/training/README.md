@@ -12,7 +12,7 @@ This command synthesizes a dataset, trains the multi-task model, stores checkpoi
 
 ```python
 from kymo_tracker.data.multitask_dataset import MultiTaskDataset
-from kymo_tracker.training.multitask import (
+from kymo_tracker.deeplearning.training.multitask import (
     MultiTaskConfig,
     train_multitask_model,
     save_multitask_model,

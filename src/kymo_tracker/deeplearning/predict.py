@@ -7,7 +7,7 @@ from typing import Optional, Tuple
 import numpy as np
 import torch
 
-from kymo_tracker.models.multitask import MultiTaskUNet
+from kymo_tracker.deeplearning.models.multitask import MultiTaskUNet
 
 
 def denoise_and_segment_chunked(
