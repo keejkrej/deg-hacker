@@ -83,14 +83,22 @@ def main():
         classical_filtered = np.load(classical_case_dir / "filtered.npy")
         classical_mask = np.load(classical_case_dir / "mask.npy")
         classical_trajectories_obj = np.load(classical_case_dir / "trajectories.npy", allow_pickle=True)
-        classical_trajectories = [traj for traj in classical_trajectories_obj]
+        # Handle both list and array formats
+        if isinstance(classical_trajectories_obj, np.ndarray) and classical_trajectories_obj.ndim == 2:
+            classical_trajectories = [classical_trajectories_obj[i] for i in range(classical_trajectories_obj.shape[0])]
+        else:
+            classical_trajectories = [traj for traj in classical_trajectories_obj]
         
         # Load deep learning results
         dl_case_dir = deeplearning_dir / f"case_{i:02d}"
         dl_denoised = np.load(dl_case_dir / "denoised.npy")
         dl_mask = np.load(dl_case_dir / "mask.npy")
         dl_trajectories_obj = np.load(dl_case_dir / "trajectories.npy", allow_pickle=True)
-        dl_trajectories = [traj for traj in dl_trajectories_obj]
+        # Handle both list and array formats
+        if isinstance(dl_trajectories_obj, np.ndarray) and dl_trajectories_obj.ndim == 2:
+            dl_trajectories = [dl_trajectories_obj[i] for i in range(dl_trajectories_obj.shape[0])]
+        else:
+            dl_trajectories = [traj for traj in dl_trajectories_obj]
         
         # Create comparison plot
         print("  Creating comparison plot...")

@@ -39,9 +39,26 @@ def run_deeplearning_pipeline(kymograph_noisy, model, device):
     
     # Extract trajectories using the integrated function
     n_tracks = centers.shape[1] if centers.ndim > 1 else 1
+    
+    # First try extracting from mask
     trajectories = extract_trajectories_from_mask(
         kymograph_noisy, labeled_mask, n_tracks
     )
+    
+    # If all trajectories are NaN (mask extraction failed), fall back to using centers directly
+    all_nan = all(np.all(np.isnan(traj)) for traj in trajectories)
+    if all_nan and centers.ndim > 1:
+        # Use centers as trajectories directly
+        trajectories = []
+        for track_idx in range(n_tracks):
+            track_centers = centers[:, track_idx].copy()
+            # Only include track if it has at least some valid (non-NaN) values
+            if np.any(~np.isnan(track_centers)):
+                trajectories.append(track_centers)
+        
+        # If still no valid trajectories, add at least one empty one
+        if not trajectories:
+            trajectories.append(np.full(kymograph_noisy.shape[0], np.nan))
     
     return {
         'denoised': denoised,
