@@ -33,6 +33,7 @@ class MultiTaskDataset(Dataset):
         multi_trajectory_prob: float = 1.0,
         max_trajectories: int = 3,
         mask_peak_width_samples: float = 10.0,
+        particle_peak_width_samples: Optional[float] = None,
         seed: Optional[int] = None,
     ):
         """Initialize the dataset.
@@ -47,7 +48,9 @@ class MultiTaskDataset(Dataset):
             noise_level: Noise level range (single value or tuple)
             multi_trajectory_prob: Probability of generating multiple trajectories
             max_trajectories: Maximum number of trajectories per sample
-            mask_peak_width_samples: Width of Gaussian peaks in samples
+            mask_peak_width_samples: Target width for locator training (in pixels)
+            particle_peak_width_samples: Actual particle width for generation (in pixels).
+                If None, uses a fixed value (2.0) to keep denoiser training consistent.
             seed: Random seed for reproducibility
         """
         self.n_samples = n_samples
@@ -55,6 +58,8 @@ class MultiTaskDataset(Dataset):
         self.window_length = window_length
         self.max_trajectories = max_trajectories
         self.mask_peak_width_samples = mask_peak_width_samples
+        # Use fixed particle width for denoiser training, separate from locator target
+        self.particle_peak_width_samples = particle_peak_width_samples if particle_peak_width_samples is not None else 2.0
         
         # Normalize ranges
         if isinstance(radii_nm, (int, float)):
@@ -108,13 +113,14 @@ class MultiTaskDataset(Dataset):
         diffusions = [get_diffusion_coefficient(r) for r in radii]
         
         # Generate kymograph directly at window size (16 time frames, 512 spatial pixels)
+        # Use fixed particle width for denoiser training (separate from locator target width)
         noisy_window, gt_window, paths_window = generate_kymograph(
             length=self.window_length,  # Generate 16 time frames directly
             width=self.width,  # 512 spatial pixels
             diffusion=diffusions if len(diffusions) > 1 else diffusions[0],
             contrast=contrasts if len(contrasts) > 1 else contrasts[0],
             noise_level=noise_level,
-            peak_width=self.mask_peak_width_samples * 0.5,  # Convert samples to micrometers
+            peak_width=self.particle_peak_width_samples * 0.5,  # Convert samples to micrometers
             dt=1.0,
             dx=0.5,
             seed=None,  # Use random seed
