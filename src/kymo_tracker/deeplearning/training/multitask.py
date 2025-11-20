@@ -26,8 +26,12 @@ def masked_l1_loss(
 ) -> torch.Tensor:
     """Compute mean absolute error on valid positions only."""
 
-    masked_diff = torch.abs(pred - target) * mask
-    denom = mask.sum().clamp_min(eps)
+    # Mask out NaN values in target
+    valid_target = ~torch.isnan(target)
+    combined_mask = mask * valid_target.float()
+    
+    masked_diff = torch.abs(pred - target) * combined_mask
+    denom = combined_mask.sum().clamp_min(eps)
     return masked_diff.sum() / denom
 
 
@@ -172,122 +176,121 @@ def train_multitask_model(config: MultiTaskConfig, dataset: MultiTaskDataset) ->
             locator_loss = (
                 config.locator_center_weight * center_loss
                 + config.locator_width_weight * width_loss
-+            )
-+
-+            adaptive_denoise_weight = config.denoise_loss_weight
-+            if config.auto_balance_losses:
-+                with torch.no_grad():
-+                    ratio = (locator_loss.detach() + 1e-6) / (denoise_loss.detach() + 1e-6)
-+                    ratio = torch.clamp(
-+                        ratio,
-+                        min=config.balance_min_scale,
-+                        max=config.balance_max_scale,
-+                    )
-+                    adaptive_denoise_weight *= ratio.item()
-+
-+            total_loss = adaptive_denoise_weight * denoise_loss + config.locator_loss_weight * locator_loss
-+            total_loss.backward()
-+
-+            if config.use_gradient_clipping:
-+                torch.nn.utils.clip_grad_norm_(model.parameters(), config.max_grad_norm)
-+
-+            optimizer.step()
-+
-+            epoch_denoise += denoise_loss.item()
-+            epoch_center += center_loss.item()
-+            epoch_width += width_loss.item()
-+            epoch_locator += locator_loss.item()
-+            epoch_total += total_loss.item()
-+            batch_count += 1
-+
-+            pbar.set_postfix(
-+                denoise=f"{denoise_loss.item():.4f}",
-+                locator=f"{locator_loss.item():.4f}",
-+                lr=f"{optimizer.param_groups[0]['lr']:.2e}",
-+                total=f"{total_loss.item():.4f}",
-+            )
-+
-+        pbar.close()
-+
-+        avg_denoise = epoch_denoise / max(batch_count, 1)
-+        avg_locator = epoch_locator / max(batch_count, 1)
-+        avg_center = epoch_center / max(batch_count, 1)
-+        avg_width = epoch_width / max(batch_count, 1)
-+        avg_total = epoch_total / max(batch_count, 1)
-+        print(
-+            f"Epoch {epoch + 1}/{config.epochs} completed: Total={avg_total:.6f}, "
-+            f"Denoise={avg_denoise:.6f}, Locator={avg_locator:.6f} "
-+            f"(center={avg_center:.6f}, width={avg_width:.6f}), "
-+            f"Time={time.time() - epoch_start:.2f}s",
-+        )
-+
-+        if config.checkpoint_dir and (epoch + 1) % config.checkpoint_every == 0:
-+            checkpoint = {
-+                "epoch": epoch + 1,
-+                "model_state_dict": model.state_dict(),
-+                "optimizer_state_dict": optimizer.state_dict(),
-+                "best_loss": best_loss,
-+                "config": config,
-+            }
-+            checkpoint_path = os.path.join(
-+                config.checkpoint_dir,
-+                f"checkpoint_epoch_{epoch + 1}.pth",
-+            )
-+            torch.save(checkpoint, checkpoint_path)
-+            print(f"  Saved checkpoint: {checkpoint_path}")
-+
-+        if config.save_best and avg_total < best_loss:
-+            best_loss = avg_total
-+            if config.checkpoint_dir:
-+                best_path = os.path.join(config.checkpoint_dir, "best_model.pth")
-+                checkpoint = {
-+                    "epoch": epoch + 1,
-+                    "model_state_dict": model.state_dict(),
-+                    "optimizer_state_dict": optimizer.state_dict(),
-+                    "best_loss": best_loss,
-+                    "config": config,
-+                }
-+                torch.save(checkpoint, best_path)
-+                print(f"  New best model saved to {best_path}")
-+
-+        if scheduler is not None:
-+            scheduler.step(avg_total)
-+
-+    model.eval()
-+    return model
-+
-+
+            )
+
+            adaptive_denoise_weight = config.denoise_loss_weight
+            if config.auto_balance_losses:
+                with torch.no_grad():
+                    ratio = (locator_loss.detach() + 1e-6) / (denoise_loss.detach() + 1e-6)
+                    ratio = torch.clamp(
+                        ratio,
+                        min=config.balance_min_scale,
+                        max=config.balance_max_scale,
+                    )
+                    adaptive_denoise_weight *= ratio.item()
+
+            total_loss = adaptive_denoise_weight * denoise_loss + config.locator_loss_weight * locator_loss
+            total_loss.backward()
+
+            if config.use_gradient_clipping:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), config.max_grad_norm)
+
+            optimizer.step()
+
+            epoch_denoise += denoise_loss.item()
+            epoch_center += center_loss.item()
+            epoch_width += width_loss.item()
+            epoch_locator += locator_loss.item()
+            epoch_total += total_loss.item()
+            batch_count += 1
+
+            pbar.set_postfix(
+                denoise=f"{denoise_loss.item():.4f}",
+                locator=f"{locator_loss.item():.4f}",
+                lr=f"{optimizer.param_groups[0]['lr']:.2e}",
+                total=f"{total_loss.item():.4f}",
+            )
+
+        pbar.close()
+
+        avg_denoise = epoch_denoise / max(batch_count, 1)
+        avg_locator = epoch_locator / max(batch_count, 1)
+        avg_center = epoch_center / max(batch_count, 1)
+        avg_width = epoch_width / max(batch_count, 1)
+        avg_total = epoch_total / max(batch_count, 1)
+        print(
+            f"Epoch {epoch + 1}/{config.epochs} completed: Total={avg_total:.6f}, "
+            f"Denoise={avg_denoise:.6f}, Locator={avg_locator:.6f} "
+            f"(center={avg_center:.6f}, width={avg_width:.6f}), "
+            f"Time={time.time() - epoch_start:.2f}s",
+        )
+
+        if config.checkpoint_dir and (epoch + 1) % config.checkpoint_every == 0:
+            checkpoint = {
+                "epoch": epoch + 1,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "best_loss": best_loss,
+                "config": config,
+            }
+            checkpoint_path = os.path.join(
+                config.checkpoint_dir,
+                f"checkpoint_epoch_{epoch + 1}.pth",
+            )
+            torch.save(checkpoint, checkpoint_path)
+            print(f"  Saved checkpoint: {checkpoint_path}")
+
+        if config.save_best and avg_total < best_loss:
+            best_loss = avg_total
+            if config.checkpoint_dir:
+                best_path = os.path.join(config.checkpoint_dir, "best_model.pth")
+                checkpoint = {
+                    "epoch": epoch + 1,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "best_loss": best_loss,
+                    "config": config,
+                }
+                torch.save(checkpoint, best_path)
+                print(f"  New best model saved to {best_path}")
+
+        if scheduler is not None:
+            scheduler.step(avg_total)
+
+    model.eval()
+    return model
+
+
 def save_multitask_model(model: MultiTaskUNet, path: str) -> None:
-+    """Persist the trained model weights."""
-+
-+    torch.save(model.state_dict(), path)
-+    print(f"Multi-task model saved to {path}")
-+
-+
+    """Persist the trained model weights."""
+
+    torch.save(model.state_dict(), path)
+    print(f"Multi-task model saved to {path}")
+
+
 def load_multitask_model(
-+    path: str,
-+    device: Optional[str] = None,
-+    max_tracks: int = 3,
-+) -> MultiTaskUNet:
-+    """Load a trained multi-task model."""
-+
-+    device = device or get_default_device()
-+    model = MultiTaskUNet(max_tracks=max_tracks).to(device)
-+
-+    checkpoint = torch.load(path, map_location=device, weights_only=False)
-+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
-+        model.load_state_dict(checkpoint["model_state_dict"])
-+    else:
-+        model.load_state_dict(checkpoint)
-+
-+    model.eval()
-+    return model
-+
-+
-+__all__ = [
-+    "MultiTaskConfig",
-+    "MultiTaskDataset",
-+    "train_multitask_model",
-+    "save_multitask_model",
-+    "load_multitask_model",
-+]
+    path: str,
+    device: Optional[str] = None,
+    max_tracks: int = 3,
+) -> MultiTaskUNet:
+    """Load a trained multi-task model."""
+
+    device = device or get_default_device()
+    model = MultiTaskUNet(max_tracks=max_tracks).to(device)
+
+    checkpoint = torch.load(path, map_location=device, weights_only=False)
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+        model.load_state_dict(checkpoint["model_state_dict"])
+    else:
+        model.load_state_dict(checkpoint)
+
+    model.eval()
+    return model
+
+
+__all__ = [
+    "MultiTaskConfig",
+    "train_multitask_model",
+    "save_multitask_model",
+    "load_multitask_model",
+]

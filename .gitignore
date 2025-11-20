@@ -135,6 +135,8 @@ cython_debug/
 # Model checkpoints (keep structure, ignore weights)
 *.pth
 models/*.pth
+artifacts/
+checkpoints/
 
 # Generated figures (keep structure)
 figures/**/*.png
@@ -143,8 +145,14 @@ figures/**/*.png
 # Data files
 *.npy
 *.csv
-data/
+/data/
+demo/data/
+demo/results/
 Hackathon/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
 
 # Archives
 *.zip
@@ -152,3 +160,8 @@ Hackathon/
 # Temporary files
 *_backup.py
 *_temp.py
+
+# Python cache
+*.egg-info/
+__pycache__/
+*.pyc
