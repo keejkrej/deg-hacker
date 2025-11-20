@@ -148,7 +148,7 @@ run_stage() {
 # Run stages
 if [[ "$STAGES" == "all" ]]; then
     run_stage 1 "Generate Data"
-    run_stage 2 "Train Model" --skip-if-exists
+    run_stage 2 "Train Model"
     run_stage 3 "Run Classical Pipeline"
     run_stage 4 "Run Deep Learning Pipeline"
     run_stage 5 "Visualize Comparison"

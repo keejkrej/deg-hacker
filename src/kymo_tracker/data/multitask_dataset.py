@@ -127,13 +127,17 @@ class MultiTaskDataset(Dataset):
         
         # Prepare target positions and widths
         # Shape: (max_trajectories, window_length)
+        # NOTE: Model outputs normalized values (centers: [0,1], widths: normalized by width)
+        # So we need to normalize targets to match model output format
         target_pos = np.full((self.max_trajectories, self.window_length), np.nan, dtype=np.float32)
         target_width = np.full((self.max_trajectories, self.window_length), np.nan, dtype=np.float32)
         valid_mask = np.zeros((self.max_trajectories, self.window_length), dtype=np.float32)
         
         for i in range(n_trajectories):
-            target_pos[i, :] = paths_window[i, :]
-            target_width[i, :] = self.mask_peak_width_samples
+            # Normalize positions: pixel [0, width-1] -> normalized [0, 1]
+            target_pos[i, :] = paths_window[i, :] / (self.width - 1)
+            # Normalize widths: pixels -> normalized (divide by width)
+            target_width[i, :] = self.mask_peak_width_samples / self.width
             valid_mask[i, :] = 1.0
         
         # Convert to tensors and add channel dimension
