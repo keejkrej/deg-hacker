@@ -3,6 +3,9 @@
 The canonical import path is :mod:`kymo_tracker.deeplearning`.
 """
 
-from kymo_tracker.deeplearning import denoise_and_segment_chunked
+from kymo_tracker.deeplearning import (
+    process_slice_independently,
+    link_trajectories_across_slices,
+)
 
-__all__ = ["denoise_and_segment_chunked"]
+__all__ = ["process_slice_independently", "link_trajectories_across_slices"]

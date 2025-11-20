@@ -24,9 +24,8 @@ from kymo_tracker.deeplearning.training.multitask import (
 )
 from kymo_tracker.data.multitask_dataset import MultiTaskDataset
 from kymo_tracker.deeplearning.predict import (
-    denoise_and_segment_chunked,
-    create_mask_from_centers_widths,
-    extract_trajectories_from_mask,
+    process_slice_independently,
+    link_trajectories_across_slices,
 )
 from kymo_tracker.utils.device import get_default_device
 from kymo_tracker.utils.visualization import visualize_comparison
@@ -65,35 +64,77 @@ def run_classical_pipeline(kymograph_noisy):
 
 def run_deeplearning_pipeline(kymograph_noisy, model, device):
     """Run deep learning denoising + locator pipeline."""
-    denoised, track_params = denoise_and_segment_chunked(
-        model,
-        kymograph_noisy,
-        device=device,
-        chunk_size=16,
-        overlap=8,
+    T, W = kymograph_noisy.shape
+    chunk_size = 16
+    overlap = 8
+    
+    # Process each slice independently
+    slice_results = []
+    start = 0
+    while start < T:
+        end = min(start + chunk_size, T)
+        slice_data = kymograph_noisy[start:end]
+        slice_result = process_slice_independently(model, slice_data, device=device)
+        slice_results.append(slice_result)
+        start += chunk_size - overlap
+    
+    # Link trajectories
+    slice_trajectories_list = [result['trajectories'] for result in slice_results]
+    linked_trajectories = link_trajectories_across_slices(
+        slice_trajectories_list,
+        chunk_size=chunk_size,
+        overlap=overlap,
     )
     
-    centers = track_params['centers']  # (T, N_tracks)
-    widths = track_params['widths']    # (T, N_tracks)
+    # Reconstruct full outputs for visualization
+    denoised_full = np.zeros((T, W), dtype=np.float32)
+    weights = np.zeros((T, W), dtype=np.float32)
+    mask_full = np.zeros((T, W), dtype=bool)
+    labeled_mask_full = np.zeros((T, W), dtype=int)
     
-    # Create segmentation mask from centers/widths
-    mask, labeled_mask = create_mask_from_centers_widths(
-        centers, widths, kymograph_noisy.shape
-    )
+    window = np.ones(chunk_size)
+    if overlap > 0:
+        fade_len = overlap // 2
+        window[:fade_len] = np.linspace(0, 1, fade_len)
+        window[-fade_len:] = np.linspace(1, 0, fade_len)
     
-    # Extract trajectories using the integrated function
-    n_tracks = centers.shape[1] if centers.ndim > 1 else 1
-    trajectories = extract_trajectories_from_mask(
-        kymograph_noisy, labeled_mask, n_tracks
-    )
+    centers_full = None
+    widths_full = None
+    temporal_weights = np.zeros((T, 1), dtype=np.float32)
+    
+    start = 0
+    for result in slice_results:
+        end = min(start + chunk_size, T)
+        actual_len = end - start
+        
+        weight_chunk = window[:actual_len, np.newaxis]
+        denoised_full[start:end] += result['denoised'] * weight_chunk
+        weights[start:end] += weight_chunk
+        mask_full[start:end] = result['mask']
+        labeled_mask_full[start:end] = result['labeled_mask']
+        
+        if centers_full is None:
+            n_tracks = result['centers'].shape[1] if result['centers'].ndim > 1 else 1
+            centers_full = np.zeros((T, n_tracks), dtype=np.float32)
+            widths_full = np.zeros((T, n_tracks), dtype=np.float32)
+        
+        centers_full[start:end] += result['centers'] * weight_chunk
+        widths_full[start:end] += result['widths'] * weight_chunk
+        temporal_weights[start:end] += weight_chunk
+        
+        start += chunk_size - overlap
+    
+    denoised_full = np.divide(denoised_full, weights, out=np.zeros_like(denoised_full), where=weights > 0)
+    centers_full = np.divide(centers_full, temporal_weights, out=np.zeros_like(centers_full), where=temporal_weights > 0)
+    widths_full = np.divide(widths_full, temporal_weights, out=np.zeros_like(widths_full), where=temporal_weights > 0)
     
     return {
-        'denoised': denoised,
-        'mask': mask,
-        'labeled_mask': labeled_mask,
-        'trajectories': trajectories,
-        'centers': centers,
-        'widths': widths,
+        'denoised': denoised_full,
+        'mask': mask_full,
+        'labeled_mask': labeled_mask_full,
+        'trajectories': linked_trajectories,
+        'centers': centers_full,
+        'widths': widths_full,
     }
 
 

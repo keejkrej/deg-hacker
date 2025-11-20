@@ -6,7 +6,10 @@ from .deeplearning.training.multitask import (
     save_multitask_model,
     load_multitask_model,
 )
-from .deeplearning.predict import denoise_and_segment_chunked
+from .deeplearning.predict import (
+    process_slice_independently,
+    link_trajectories_across_slices,
+)
 from .deeplearning.models.multitask import MultiTaskUNet
 
 __all__ = [
@@ -14,6 +17,7 @@ __all__ = [
     "train_multitask_model",
     "save_multitask_model",
     "load_multitask_model",
-    "denoise_and_segment_chunked",
+    "process_slice_independently",
+    "link_trajectories_across_slices",
     "MultiTaskUNet",
 ]

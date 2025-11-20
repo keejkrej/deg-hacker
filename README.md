@@ -109,11 +109,15 @@ The deep learning pipeline uses a multi-task U-Net that combines denoising and l
    - **Denoiser**: [`DenoiseUNet`](src/kymo_tracker/deeplearning/models/multitask.py#L60) - a tiny U-Net that predicts noise residuals (DDPM-style)
    - **Locator**: [`TemporalLocator`](src/kymo_tracker/deeplearning/models/multitask.py#L149) - CNN + 1D ViT head that regresses per-track `(center, width)` trajectories
 
-2. **Chunked inference**: [`denoise_and_segment_chunked()`](src/kymo_tracker/deeplearning/predict.py#L13) in [`src/kymo_tracker/deeplearning/predict.py`](src/kymo_tracker/deeplearning/predict.py) processes `512×16` slices with 8-frame overlap:
-   - Slices the kymograph into overlapping temporal windows
-   - Applies the model to each chunk
-   - Blends predictions using fade-in/fade-out windows to handle overlaps
-   - Returns denoised kymograph and track parameters (`centers`, `widths`)
+2. **Per-slice processing**: [`process_slice_independently()`](src/kymo_tracker/deeplearning/predict.py) processes each `16×512` slice independently:
+   - Applies the model to each slice
+   - Creates masks and extracts trajectories from each slice
+   - Returns trajectories for that slice only
+   
+3. **Trajectory linking**: [`link_trajectories_across_slices()`](src/kymo_tracker/deeplearning/predict.py) links trajectories across overlapping slices:
+   - Connects trajectory segments from different slices
+   - Handles overlaps by averaging values in overlap regions
+   - Returns full-length linked trajectories
 
 3. **Mask creation**: The locator outputs `(center, width)` predictions for each track, which define corridors in the kymograph. These corridors serve as masks for trajectory extraction.
 

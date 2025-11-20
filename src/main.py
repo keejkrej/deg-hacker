@@ -13,7 +13,11 @@ from kymo_tracker.deeplearning.training.multitask import (
     save_multitask_model,
     load_multitask_model,
 )
-from kymo_tracker.deeplearning.predict import denoise_and_segment_chunked
+from kymo_tracker.deeplearning.predict import (
+    process_slice_independently,
+    link_trajectories_across_slices,
+)
+from kymo_tracker.utils.device import get_default_device
 
 app = typer.Typer(add_completion=False)
 
@@ -75,18 +79,51 @@ def infer(
     if kymograph.ndim != 2:
         raise typer.BadParameter("Input array must be 2D (time, width)")
 
-    model = load_multitask_model(str(model_path))
-    denoised, track_params = denoise_and_segment_chunked(
-        model,
-        kymograph,
+    device = get_default_device()
+    model = load_multitask_model(str(model_path), device=device)
+    
+    # Process each slice independently
+    T, W = kymograph.shape
+    slice_results = []
+    start = 0
+    while start < T:
+        end = min(start + chunk_size, T)
+        slice_data = kymograph[start:end]
+        slice_result = process_slice_independently(model, slice_data, device=device)
+        slice_results.append(slice_result)
+        start += chunk_size - overlap
+    
+    # Link trajectories
+    slice_trajectories_list = [result['trajectories'] for result in slice_results]
+    linked_trajectories = link_trajectories_across_slices(
+        slice_trajectories_list,
         chunk_size=chunk_size,
         overlap=overlap,
     )
+    
+    # Reconstruct denoised kymograph (blend slices)
+    denoised = np.zeros((T, W), dtype=np.float32)
+    weights = np.zeros((T, W), dtype=np.float32)
+    window = np.ones(chunk_size)
+    if overlap > 0:
+        fade_len = overlap // 2
+        window[:fade_len] = np.linspace(0, 1, fade_len)
+        window[-fade_len:] = np.linspace(1, 0, fade_len)
+    
+    start = 0
+    for result in slice_results:
+        end = min(start + chunk_size, T)
+        actual_len = end - start
+        weight_chunk = window[:actual_len, np.newaxis]
+        denoised[start:end] += result['denoised'] * weight_chunk
+        weights[start:end] += weight_chunk
+        start += chunk_size - overlap
+    
+    denoised = np.divide(denoised, weights, out=np.zeros_like(denoised), where=weights > 0)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     np.save(output_dir / "denoised.npy", denoised)
-    np.save(output_dir / "centers.npy", track_params["centers"])
-    np.save(output_dir / "widths.npy", track_params["widths"])
+    np.save(output_dir / "trajectories.npy", np.array(linked_trajectories, dtype=object))
 
     typer.echo(
         f"Saved denoised kymograph and trajectories to {output_dir.resolve()}"

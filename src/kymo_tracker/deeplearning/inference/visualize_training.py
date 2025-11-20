@@ -18,7 +18,6 @@ import shutil
 
 from kymo_tracker.data.multitask_dataset import MultiTaskDataset
 from kymo_tracker.deeplearning.training.multitask import load_multitask_model
-from kymo_tracker.deeplearning.predict import denoise_and_segment_chunked
 from kymo_tracker.utils.device import get_default_device
 from kymo_tracker.utils.helpers import get_diffusion_coefficient
 
@@ -64,14 +63,14 @@ def visualize_training_example(
     gt_positions_px = gt_positions * max(space_len - 1, 1)
     gt_widths_px = gt_widths * max(space_len, 1)
 
-    # Run inference
+    # Run inference - process slice independently (noisy is already 16x512)
+    from kymo_tracker.deeplearning.predict import process_slice_independently
     model.eval()
     with torch.no_grad():
-        denoised, track_params = denoise_and_segment_chunked(
-            model, noisy, device=device, chunk_size=16, overlap=8
-        )
-    pred_centers = track_params["centers"]
-    pred_widths = track_params["widths"]
+        slice_result = process_slice_independently(model, noisy, device=device)
+    denoised = slice_result["denoised"]
+    pred_centers = slice_result["centers"]
+    pred_widths = slice_result["widths"]
     pred_centers = np.clip(pred_centers, 0.0, space_len - 1)
     pred_widths = np.clip(pred_widths, 0.0, space_len)
 
