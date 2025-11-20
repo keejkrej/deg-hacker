@@ -36,7 +36,7 @@ def run_classical_pipeline(kymograph_noisy):
     """Run classical median filter + thresholding pipeline."""
     result = classical_median_threshold_tracking(
         kymograph_noisy,
-        median_kernel=(5, 1),
+        median_kernel=(11, 11),
         threshold_mode="otsu",
         min_component_size=8,
     )
