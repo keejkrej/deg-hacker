@@ -32,7 +32,7 @@ class MultiTaskDataset(Dataset):
         noise_level: Union[float, Tuple[float, float]] = (0.08, 0.8),
         multi_trajectory_prob: float = 1.0,
         max_trajectories: int = 3,
-        mask_peak_width_samples: float = 2.0,
+        mask_peak_width_samples: float = 10.0,
         seed: Optional[int] = None,
     ):
         """Initialize the dataset.

@@ -288,7 +288,7 @@ def main():
             noise_level=(0.08, 0.8),
             multi_trajectory_prob=1.0,
             max_trajectories=3,
-            mask_peak_width_samples=2.0,
+            mask_peak_width_samples=10.0,
         )
         
         config = MultiTaskConfig(
