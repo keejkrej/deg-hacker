@@ -20,10 +20,9 @@ This document lists all dimension specifications used throughout the project.
   - Used as default parameters in `src/kymo_tracker/utils/helpers.py`
   - Matches training window size
 
-### Analysis/Inference Demos
+### Analysis Functions
 - **Analysis functions**: `16 × 512` (time × space)
   - Used in `src/kymo_tracker/utils/analysis.py`
-  - Used in `src/kymo_tracker/deeplearning/inference/demo.py`
   - Matches training window size
 
 ### Tests
@@ -129,12 +128,13 @@ This document lists all dimension specifications used throughout the project.
 |---------------|-------|-------|
 | Demo kymograph | 512 × 512 | Full test cases |
 | Training window | 16 × 512 | Neural network input |
+| Default kymograph | 16 × 512 | Helper defaults |
+| Analysis kymograph | 16 × 512 | Analysis functions |
 | Chunk size | 16 | Inference processing |
 | Overlap | 8 | Chunk overlap |
 | Spatial width | 512 | Most common |
 | Temporal length | 512 | Demo |
-| Temporal length | 16 | Training windows |
-| Temporal length | 4000 | Analysis |
+| Temporal length | 16 | Training windows, defaults, analysis |
 | Batch size (demo) | 16 | Demo training |
 | Batch size (default) | 32 | Production |
 | Max trajectories | 3 | Simultaneous tracking |
