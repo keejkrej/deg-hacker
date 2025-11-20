@@ -11,62 +11,112 @@ sys.path.insert(0, str(project_root / "src"))
 sys.path.insert(0, str(project_root))
 
 from kymo_tracker.deeplearning.predict import (
-    denoise_and_segment_chunked,
-    create_mask_from_centers_widths,
-    extract_trajectories_from_mask,
+    process_slice_independently,
+    link_trajectories_across_slices,
 )
 from kymo_tracker.deeplearning.training.multitask import load_multitask_model
 from kymo_tracker.utils.device import get_default_device
 
 
 def run_deeplearning_pipeline(kymograph_noisy, model, device):
-    """Run deep learning denoising + locator pipeline."""
-    denoised, track_params = denoise_and_segment_chunked(
-        model,
-        kymograph_noisy,
-        device=device,
-        chunk_size=16,
-        overlap=8,
-    )
+    """
+    Run deep learning denoising + locator pipeline.
     
-    centers = track_params['centers']  # (T, N_tracks)
-    widths = track_params['widths']    # (T, N_tracks)
+    Processes each 16x512 slice independently, extracts trajectories per slice,
+    then links trajectories across slices at the end.
+    """
+    T, W = kymograph_noisy.shape
+    chunk_size = 16
+    overlap = 8
     
-    # Create segmentation mask from centers/widths
-    mask, labeled_mask = create_mask_from_centers_widths(
-        centers, widths, kymograph_noisy.shape
-    )
-    
-    # Extract trajectories using the integrated function
-    n_tracks = centers.shape[1] if centers.ndim > 1 else 1
-    
-    # First try extracting from mask
-    trajectories = extract_trajectories_from_mask(
-        kymograph_noisy, labeled_mask, n_tracks
-    )
-    
-    # If all trajectories are NaN (mask extraction failed), fall back to using centers directly
-    all_nan = all(np.all(np.isnan(traj)) for traj in trajectories)
-    if all_nan and centers.ndim > 1:
-        # Use centers as trajectories directly
-        trajectories = []
-        for track_idx in range(n_tracks):
-            track_centers = centers[:, track_idx].copy()
-            # Only include track if it has at least some valid (non-NaN) values
-            if np.any(~np.isnan(track_centers)):
-                trajectories.append(track_centers)
+    # Process each slice independently
+    slice_results = []
+    start = 0
+    while start < T:
+        end = min(start + chunk_size, T)
+        slice_data = kymograph_noisy[start:end]
         
-        # If still no valid trajectories, add at least one empty one
-        if not trajectories:
-            trajectories.append(np.full(kymograph_noisy.shape[0], np.nan))
+        # Process this slice independently
+        slice_result = process_slice_independently(
+            model, slice_data, device=device
+        )
+        slice_results.append(slice_result)
+        
+        start += chunk_size - overlap
+    
+    # Collect trajectories from each slice
+    slice_trajectories_list = [result['trajectories'] for result in slice_results]
+    
+    # Link trajectories across slices
+    linked_trajectories = link_trajectories_across_slices(
+        slice_trajectories_list,
+        chunk_size=chunk_size,
+        overlap=overlap,
+    )
+    
+    # Reconstruct full denoised kymograph and masks (for visualization)
+    # Blend denoised slices with overlap handling
+    denoised_full = np.zeros((T, W), dtype=np.float32)
+    weights = np.zeros((T, W), dtype=np.float32)
+    mask_full = np.zeros((T, W), dtype=bool)
+    labeled_mask_full = np.zeros((T, W), dtype=int)
+    
+    window = np.ones(chunk_size)
+    if overlap > 0:
+        fade_len = overlap // 2
+        window[:fade_len] = np.linspace(0, 1, fade_len)
+        window[-fade_len:] = np.linspace(1, 0, fade_len)
+    
+    start = 0
+    for i, result in enumerate(slice_results):
+        end = min(start + chunk_size, T)
+        actual_len = end - start
+        
+        weight_chunk = window[:actual_len, np.newaxis]
+        denoised_full[start:end] += result['denoised'] * weight_chunk
+        weights[start:end] += weight_chunk
+        
+        # For masks, just take the last slice's mask in overlap regions
+        mask_full[start:end] = result['mask']
+        labeled_mask_full[start:end] = result['labeled_mask']
+        
+        start += chunk_size - overlap
+    
+    denoised_full = np.divide(denoised_full, weights, out=np.zeros_like(denoised_full), where=weights > 0)
+    
+    # Reconstruct centers/widths for compatibility (blended across slices)
+    # This is mainly for visualization/debugging
+    centers_full = None
+    widths_full = None
+    temporal_weights = np.zeros((T, 1), dtype=np.float32)
+    
+    start = 0
+    for i, result in enumerate(slice_results):
+        end = min(start + chunk_size, T)
+        actual_len = end - start
+        
+        if centers_full is None:
+            n_tracks = result['centers'].shape[1] if result['centers'].ndim > 1 else 1
+            centers_full = np.zeros((T, n_tracks), dtype=np.float32)
+            widths_full = np.zeros((T, n_tracks), dtype=np.float32)
+        
+        weight_chunk = window[:actual_len, np.newaxis]
+        centers_full[start:end] += result['centers'] * weight_chunk
+        widths_full[start:end] += result['widths'] * weight_chunk
+        temporal_weights[start:end] += weight_chunk
+        
+        start += chunk_size - overlap
+    
+    centers_full = np.divide(centers_full, temporal_weights, out=np.zeros_like(centers_full), where=temporal_weights > 0)
+    widths_full = np.divide(widths_full, temporal_weights, out=np.zeros_like(widths_full), where=temporal_weights > 0)
     
     return {
-        'denoised': denoised,
-        'mask': mask,
-        'labeled_mask': labeled_mask,
-        'trajectories': trajectories,
-        'centers': centers,
-        'widths': widths,
+        'denoised': denoised_full,
+        'mask': mask_full,
+        'labeled_mask': labeled_mask_full,
+        'trajectories': linked_trajectories,
+        'centers': centers_full,
+        'widths': widths_full,
     }
 
 
