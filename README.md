@@ -119,9 +119,9 @@ The deep learning pipeline uses a multi-task U-Net that combines denoising and l
    - Handles overlaps by averaging values in overlap regions
    - Returns full-length linked trajectories
 
-3. **Mask creation**: The locator outputs `(center, width)` predictions for each track, which define corridors in the kymograph. These corridors serve as masks for trajectory extraction.
+4. **Mask creation**: The locator outputs `(center, width)` predictions for each track, which define corridors in the kymograph. These corridors serve as masks for trajectory extraction.
 
-4. **Trajectory extraction**: Trajectories are extracted from the predicted masks using subpixel peak finding.
+5. **Trajectory extraction**: Trajectories are extracted from the predicted masks using subpixel peak finding.
 
 ### Trajectory Analysis
 
