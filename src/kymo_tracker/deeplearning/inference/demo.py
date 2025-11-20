@@ -17,7 +17,7 @@ particle_size = 5  # in nm
 diffusion_coefficient = get_diffusion_coefficient(particle_size)
 x_step = 0.5 # each sample is 0.5µm. This is determined by the microscope pixel size and magnification
 t_step = 1.0 # each time step is 1ms. This is determined by the camera frame rate
-kymograph_noisy, kymograph_gt, true_path = generate_kymograph(length=4000, width=256,
+kymograph_noisy, kymograph_gt, true_path = generate_kymograph(length=16, width=512,
                                                               diffusion=diffusion_coefficient,
                                                               contrast = 1,
                                                               noise_level=0.3,
@@ -57,7 +57,7 @@ particle_size_1 = 5  # in nm
 particle_size_2 = 20  # in nm
 diffusion_coefficient_1 = get_diffusion_coefficient(particle_size_1)
 diffusion_coefficient_2 = get_diffusion_coefficient(particle_size_2)
-kymograph_noisy, kymograph_gt, true_path = generate_kymograph(length=4000, width=256, 
+kymograph_noisy, kymograph_gt, true_path = generate_kymograph(length=16, width=512, 
                                                               diffusion=[diffusion_coefficient_1, diffusion_coefficient_2],
                                                               contrast=[1.0, 0.5], 
                                                               noise_level=0.3, peak_width=1, dx=x_step, dt=t_step)

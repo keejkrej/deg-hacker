@@ -93,7 +93,7 @@ METRIC_FIELDNAMES = [
 
 
 def simulate_single_particle(
-    p, c, n, x_step=0.5, t_step=1.0, n_t=4000, n_x=256, peak_width=1
+    p, c, n, x_step=0.5, t_step=1.0, n_t=16, n_x=512, peak_width=1
 ):
     """Generate a noisy/ground-truth kymograph and metadata for a single particle."""
     diffusion = get_diffusion_coefficient(p)
@@ -128,8 +128,8 @@ def simulate_multi_particle(
     noise_level,
     x_step=0.5,
     t_step=1.0,
-    n_t=4000,
-    n_x=256,
+    n_t=16,
+    n_x=512,
     peak_width=1,
 ):
     """Simulate a multi-particle kymograph with independent radii/contrasts."""

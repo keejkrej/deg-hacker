@@ -59,7 +59,7 @@ def estimate_diffusion_msd_fit(positions_um, dt=1, dx = 0.5, max_lag=10):
     return D_um2_ms
 
 
-def generate_kymograph(length=400, width=128, contrast=1.0, diffusion=1.0,
+def generate_kymograph(length=16, width=512, contrast=1.0, diffusion=1.0,
                        noise_level=1.0, peak_width=1.0, dt=1.0, dx=0.5,
                        seed=None):
     """
