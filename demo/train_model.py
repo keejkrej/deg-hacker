@@ -42,8 +42,8 @@ def main():
     parser.add_argument(
         "--epochs",
         type=int,
-        default=3,
-        help="Number of training epochs (reduced for demo)",
+        default=15,
+        help="Number of training epochs",
     )
     parser.add_argument(
         "--batch-size",
