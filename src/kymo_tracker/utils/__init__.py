@@ -83,3 +83,10 @@ if _tracking_available:
 from kymo_tracker.utils.device import get_default_device
 
 __all__.append("get_default_device")
+
+# Import visualization utilities
+try:
+    from kymo_tracker.utils.visualization import visualize_comparison
+    __all__.append("visualize_comparison")
+except ImportError:
+    pass

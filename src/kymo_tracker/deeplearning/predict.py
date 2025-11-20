@@ -108,4 +108,108 @@ def denoise_and_segment_chunked(
     return denoised, {"centers": centers_all, "widths": widths_all}
 
 
-__all__ = ["denoise_and_segment_chunked"]
+def create_mask_from_centers_widths(
+    centers: np.ndarray,
+    widths: np.ndarray,
+    shape: tuple[int, int],
+    threshold: float = 0.1,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Create a segmentation mask from predicted centers and widths.
+    
+    Args:
+        centers: (T, N_tracks) array of center positions (in pixels)
+        widths: (T, N_tracks) array of widths (in pixels)
+        shape: (T, W) shape of the kymograph
+        threshold: Minimum width to consider a track active
+        
+    Returns:
+        mask: (T, W) boolean mask
+        labeled_mask: (T, W) integer mask with track IDs (0 = background, 1-N = track IDs)
+    """
+    T, W = shape
+    mask = np.zeros((T, W), dtype=bool)
+    labeled_mask = np.zeros((T, W), dtype=int)
+    
+    n_tracks = centers.shape[1] if centers.ndim > 1 else 1
+    
+    for track_idx in range(n_tracks):
+        if centers.ndim == 1:
+            track_centers = centers
+            track_widths = widths if isinstance(widths, (int, float)) else widths
+        else:
+            track_centers = centers[:, track_idx]
+            track_widths = widths[:, track_idx]
+        
+        for t in range(T):
+            center = track_centers[t]
+            width = track_widths[t] if not isinstance(track_widths, (int, float)) else track_widths
+            
+            # Skip if width is too small or center is invalid
+            if width < threshold or np.isnan(center) or center < 0 or center >= W:
+                continue
+            
+            # Create corridor around center
+            half_width = width / 2.0
+            start_x = max(0, int(np.floor(center - half_width)))
+            end_x = min(W, int(np.ceil(center + half_width)) + 1)
+            
+            mask[t, start_x:end_x] = True
+            labeled_mask[t, start_x:end_x] = track_idx + 1
+    
+    return mask, labeled_mask
+
+
+def extract_trajectories_from_mask(
+    kymograph: np.ndarray,
+    labeled_mask: np.ndarray,
+    n_tracks: int,
+) -> list[np.ndarray]:
+    """
+    Extract trajectories using argmax within masked regions.
+    
+    Args:
+        kymograph: (T, W) raw kymograph
+        labeled_mask: (T, W) integer mask with track IDs
+        n_tracks: Number of tracks to extract
+        
+    Returns:
+        trajectories: List of (T,) arrays, one per track
+    """
+    from kymo_tracker.utils.helpers import find_max_subpixel
+    
+    T, W = kymograph.shape
+    trajectories = []
+    
+    for track_idx in range(n_tracks):
+        traj = np.full(T, np.nan)
+        track_mask = labeled_mask == (track_idx + 1)
+        
+        for t in range(T):
+            if track_mask[t].any():
+                # Find argmax within the masked region
+                masked_row = np.where(track_mask[t], kymograph[t], -np.inf)
+                max_idx = np.argmax(masked_row)
+                if masked_row[max_idx] > -np.inf:
+                    # Subpixel refinement
+                    if 0 < max_idx < W - 1:
+                        y0, y1, y2 = masked_row[max_idx-1], masked_row[max_idx], masked_row[max_idx+1]
+                        denom = (y0 - 2*y1 + y2)
+                        if denom != 0:
+                            delta = 0.5 * (y0 - y2) / denom
+                            traj[t] = max_idx + delta
+                        else:
+                            traj[t] = max_idx
+                    else:
+                        traj[t] = max_idx
+        
+        trajectories.append(traj)
+    
+    # Ensure at least one trajectory
+    if not trajectories:
+        trajectories.append(np.full(T, np.nan))
+    
+    return trajectories
+
+
+__all__ = ["denoise_and_segment_chunked", "create_mask_from_centers_widths", "extract_trajectories_from_mask"]
