@@ -152,7 +152,7 @@ The pipeline is exposed via a Typer CLI in [`src/main.py`](src/main.py):
 
 **Training**:
 ```bash
-uv run python src/main.py train --samples 4096 --epochs 4 --checkpoint-dir checkpoints
+uv run python src/main.py train --samples 16384 --epochs 20 --checkpoint-dir checkpoints
 ```
 
 **Inference**:
@@ -160,7 +160,24 @@ uv run python src/main.py train --samples 4096 --epochs 4 --checkpoint-dir check
 uv run python src/main.py infer artifacts/multitask_unet.pth data/sample_kymo.npy --output-dir runs/demo
 ```
 
-The inference command outputs `denoised.npy`, `centers.npy`, and `widths.npy` files for downstream analysis.
+The inference command outputs `denoised.npy` and `trajectories.npy` files for downstream analysis.
+
+### Demo Pipeline
+
+For a complete demonstration, use the demo script in [`demo/run.sh`](demo/run.sh):
+
+```bash
+# Run all stages
+./demo/run.sh
+
+# Run specific stages
+./demo/run.sh 1 2 3 4 5  # Generate data, train, run both pipelines, visualize
+
+# Run only inference and visualization (if data/model already exist)
+./demo/run.sh 3 4 5
+```
+
+The demo generates 5 test cases, trains a model, runs both classical and deep learning pipelines, and creates comparison visualizations.
 
 ## Installation
 
@@ -176,29 +193,53 @@ This will create a virtual environment and install all dependencies specified in
 
 ```
 kymo-tracker/
+├── demo/                         # Demo scripts and test cases
+│   ├── generate_data.py         # Stage 1: Generate synthetic test cases
+│   ├── train_model.py           # Stage 2: Train deep learning model
+│   ├── run_classical.py         # Stage 3: Classical inference pipeline
+│   ├── run_deeplearning.py      # Stage 4: Deep learning inference pipeline
+│   ├── visualize.py             # Stage 5: Create comparison plots
+│   ├── run.sh                   # Main demo script (runs all stages)
+│   ├── run_demo.py              # Legacy all-in-one demo script
+│   ├── data/                    # Generated test case data (gitignored)
+│   └── results/                 # Inference results and plots (gitignored)
 ├── src/
-│   ├── kymo_tracker/
-│   │   ├── classical/              # Classical median/threshold pipeline
-│   │   │   └── pipeline.py        # Median filter + thresholding implementation
-│   │   ├── deeplearning/          # Deep learning modules
-│   │   │   ├── models/            # Neural network architectures
+│   ├── kymo_tracker/           # Main package
+│   │   ├── classical/          # Classical median/threshold pipeline
+│   │   │   └── pipeline.py    # Median filter + thresholding implementation
+│   │   ├── data/              # Dataset generation
+│   │   │   └── multitask_dataset.py  # MultiTaskDataset for training
+│   │   ├── deeplearning/      # Deep learning modules
+│   │   │   ├── models/        # Neural network architectures
 │   │   │   │   └── multitask.py  # MultiTaskUNet (denoiser + locator)
-│   │   │   ├── training/         # Training utilities
-│   │   │   │   └── multitask.py  # Training loop and configuration
-│   │   │   └── predict.py        # Chunked inference for long kymographs
-│   │   └── utils/                # Analysis and tracking utilities
-│   │       ├── helpers.py        # MSD fitting, particle size estimation
-│   │       └── tracking.py       # Trajectory linking and multi-particle tracking
-│   └── main.py                   # Typer CLI (train / infer)
-├── tests/                        # Test suite
-├── pyproject.toml                # Project configuration and dependencies
-└── uv.lock                       # Dependency lock file
+│   │   │   ├── training/      # Training utilities
+│   │   │   │   ├── multitask.py  # Training loop and configuration
+│   │   │   │   └── config.py     # Shared training configuration constants
+│   │   │   ├── inference/      # Inference utilities
+│   │   │   │   ├── predict.py    # Backward-compatible inference helpers
+│   │   │   │   └── visualize_training.py  # Training visualization
+│   │   │   └── predict.py     # Per-slice processing and trajectory linking
+│   │   └── utils/             # Analysis and utility functions
+│   │       ├── helpers.py     # MSD fitting, particle size estimation, kymograph generation
+│   │       ├── device.py      # Device detection utilities
+│   │       └── visualization.py  # Comparison plotting utilities
+│   └── main.py                # Typer CLI (train / infer)
+├── demo.png                   # Demo visualization image
+├── pyproject.toml            # Project configuration and dependencies
+├── requirements.txt          # Python dependencies (legacy)
+├── uv.lock                   # Dependency lock file
+└── AGENTS.md                 # Notes for AI agents working on this codebase
 ```
 
-## Testing
+## Demo
 
-Run the test suite:
+See [`demo/README.md`](demo/README.md) for detailed information about running the demo pipeline.
 
-```bash
-uv run pytest tests/
-```
+The demo includes:
+- **Stage 1**: Generate 5 synthetic test cases (`512×512` kymographs)
+- **Stage 2**: Train the deep learning model (default: 16384 samples, 20 epochs)
+- **Stage 3**: Run classical inference pipeline
+- **Stage 4**: Run deep learning inference pipeline
+- **Stage 5**: Create comparison visualizations
+
+Results are saved to `demo/results/` with comparison plots showing both approaches side-by-side.
