@@ -1,7 +1,7 @@
 ## Notes for Codex agents
 
 - Do not modify `helpers.py`. If functionality is needed, add it elsewhere.
-- Use conda `kymo` environment for Python: `conda activate kymo`
+- Use `uv` for Python environment management: `uv sync` to install dependencies, `uv run` to execute commands
 
 ## Multi-Particle Tracking
 
