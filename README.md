@@ -64,17 +64,24 @@ By identifying and masking noisy regions while preserving clean signal regions, 
 
 This masking approach applies to both **classical and deep learning methods**. Effectively, we only need to predict a **mask** (or a **segmentation mask with different labels** for multi-particle scenarios), rather than denoising the entire kymograph.
 
-**Slicing strategy**: Due to the physical nature of Brownian motion, time correlation is low between different time points. Therefore, we don't need to predict the whole kymograph at once. Instead, we predict `512×16` (position × time) slices and link them together in post-processing. This approach:
+**Slicing strategy**: Due to the physical nature of Brownian motion, time correlation is low between different time points. Therefore, we don't need to predict the whole kymograph at once. Instead, we predict `16×512` (time × space) slices and link them together in post-processing. This approach:
 
 - Reduces computational complexity
 - Leverages the low temporal correlation inherent in Brownian motion
 - Enables efficient processing of arbitrarily long kymographs
 
+**Key Dimensions**:
+- **Training windows**: `16 × 512` (time × space pixels) - generated directly, no cropping needed
+- **Demo test cases**: `512 × 512` (time × space pixels) - sliced into `16×512` windows for processing
+- **Chunk size**: `16` time frames with `8` frame overlap for trajectory linking
+- **Spatial width**: `512` pixels (standard)
+- **Max trajectories**: `3` particles tracked simultaneously
+
 ## Pipeline
 
-The complete pipeline works as follows (assuming a standard `512×20000` kymograph):
+The complete pipeline works as follows (assuming a standard `512×512` demo kymograph or longer):
 
-1. **Slicing**: Slice the kymograph into `512×16` slices, overlapping with each other by 8 time steps
+1. **Slicing**: Slice the kymograph into `16×512` (time × space) slices, overlapping with each other by 8 time steps
 
 2. **For each slice**:
    - **Predict segmentation mask**:
