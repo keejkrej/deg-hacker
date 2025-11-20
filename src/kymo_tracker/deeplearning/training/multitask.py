@@ -30,7 +30,11 @@ def masked_l1_loss(
     valid_target = ~torch.isnan(target)
     combined_mask = mask * valid_target.float()
     
-    masked_diff = torch.abs(pred - target) * combined_mask
+    # Compute difference, replacing NaN with 0 before masking
+    diff = pred - target
+    diff = torch.where(torch.isnan(diff), torch.zeros_like(diff), diff)
+    
+    masked_diff = torch.abs(diff) * combined_mask
     denom = combined_mask.sum().clamp_min(eps)
     return masked_diff.sum() / denom
 
