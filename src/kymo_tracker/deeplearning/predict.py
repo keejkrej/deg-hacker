@@ -29,11 +29,28 @@ def denoise_and_segment_chunked(
         with torch.no_grad():
             input_tensor = torch.from_numpy(kymograph).unsqueeze(0).unsqueeze(0).float().to(device)
             pred_noise, pred_centers, pred_widths = model(input_tensor)
-            denoised = torch.clamp(input_tensor - pred_noise, 0.0, 1.0).squeeze().cpu().numpy()
-            centers_np = pred_centers.squeeze(0).cpu().numpy().transpose(1, 0)
-            widths_np = pred_widths.squeeze(0).cpu().numpy().transpose(1, 0)
-            centers_px = centers_np * (width - 1)
-            widths_px = widths_np * width
+            
+            # Check for NaN outputs and handle gracefully
+            if torch.isnan(pred_noise).any():
+                import warnings
+                warnings.warn(
+                    "Model output contains NaN values. Model may not be properly trained. "
+                    "Using input as fallback (no denoising applied).",
+                    UserWarning
+                )
+                # If model outputs NaN, use input as fallback (no denoising)
+                denoised = kymograph.copy()
+                # Use default centers/widths
+                max_tracks = pred_centers.shape[1] if pred_centers.ndim > 1 else 1
+                centers_px = np.full((time_len, max_tracks), width / 2, dtype=np.float32)
+                widths_px = np.full((time_len, max_tracks), width * 0.1, dtype=np.float32)
+            else:
+                denoised = torch.clamp(input_tensor - pred_noise, 0.0, 1.0).squeeze().cpu().numpy()
+                centers_np = pred_centers.squeeze(0).cpu().numpy().transpose(1, 0)
+                widths_np = pred_widths.squeeze(0).cpu().numpy().transpose(1, 0)
+                centers_px = centers_np * (width - 1)
+                widths_px = widths_np * width
+            
             track_params = {"centers": centers_px, "widths": widths_px}
 
             del input_tensor, pred_noise, pred_centers, pred_widths
@@ -67,17 +84,34 @@ def denoise_and_segment_chunked(
 
             chunk_tensor = torch.from_numpy(padded_chunk).unsqueeze(0).unsqueeze(0).float().to(device)
             pred_noise_chunk, pred_centers_chunk, pred_widths_chunk = model(chunk_tensor)
-            denoised_chunk = torch.clamp(chunk_tensor - pred_noise_chunk, 0.0, 1.0).squeeze().cpu().numpy()
-            centers_chunk = pred_centers_chunk.squeeze(0).cpu().numpy().transpose(1, 0)
-            widths_chunk = pred_widths_chunk.squeeze(0).cpu().numpy().transpose(1, 0)
-            centers_chunk = centers_chunk * (width - 1)
-            widths_chunk = widths_chunk * width
+            
+            actual_len = end - start
+            
+            # Check for NaN outputs and handle gracefully
+            if torch.isnan(pred_noise_chunk).any():
+                import warnings
+                warnings.warn(
+                    "Model output contains NaN values. Model may not be properly trained. "
+                    "Using input as fallback (no denoising applied).",
+                    UserWarning
+                )
+                # If model outputs NaN, use input as fallback (no denoising)
+                denoised_chunk = chunk_tensor.squeeze().cpu().numpy()
+                # Use default centers/widths
+                max_tracks = pred_centers_chunk.shape[1] if pred_centers_chunk.ndim > 1 else 1
+                centers_chunk = np.full((actual_len, max_tracks), width / 2, dtype=np.float32)
+                widths_chunk = np.full((actual_len, max_tracks), width * 0.1, dtype=np.float32)
+            else:
+                denoised_chunk = torch.clamp(chunk_tensor - pred_noise_chunk, 0.0, 1.0).squeeze().cpu().numpy()
+                centers_chunk = pred_centers_chunk.squeeze(0).cpu().numpy().transpose(1, 0)
+                widths_chunk = pred_widths_chunk.squeeze(0).cpu().numpy().transpose(1, 0)
+                centers_chunk = centers_chunk * (width - 1)
+                widths_chunk = widths_chunk * width
 
             del chunk_tensor, pred_noise_chunk, pred_centers_chunk, pred_widths_chunk
             if str(device).startswith("cuda"):
                 torch.cuda.empty_cache()
 
-            actual_len = end - start
             denoised_chunk = denoised_chunk[:actual_len]
             centers_chunk = centers_chunk[:actual_len]
             widths_chunk = widths_chunk[:actual_len]
