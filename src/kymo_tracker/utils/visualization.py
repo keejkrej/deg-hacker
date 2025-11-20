@@ -69,6 +69,15 @@ def visualize_comparison(
     has_trajectories = False
     for i, traj in enumerate(classical_trajectories):
         if traj is not None and len(traj) > 0:
+            traj = np.asarray(traj, dtype=np.float64)
+            # Ensure trajectory length matches kymograph time dimension
+            if len(traj) > T:
+                traj = traj[:T]
+            elif len(traj) < T:
+                # Pad with NaN if shorter
+                padded = np.full(T, np.nan, dtype=np.float64)
+                padded[:len(traj)] = traj
+                traj = padded
             valid = ~np.isnan(traj)
             if valid.any():
                 ax.plot(np.arange(T)[valid], traj[valid], 
@@ -78,6 +87,7 @@ def visualize_comparison(
     if true_paths:
         for i, true_path in enumerate(true_paths):
             if true_path is not None and len(true_path) > 0:
+                true_path = np.asarray(true_path, dtype=np.float64)
                 ax.plot(true_path, color=colors[i % len(colors)], 
                        linestyle='--', linewidth=1.5, alpha=0.5, 
                        label=f'True {i+1}' if i < 2 else None)
@@ -115,6 +125,15 @@ def visualize_comparison(
     has_trajectories = False
     for i, traj in enumerate(deeplearning_trajectories):
         if traj is not None and len(traj) > 0:
+            traj = np.asarray(traj, dtype=np.float64)
+            # Ensure trajectory length matches kymograph time dimension
+            if len(traj) > T:
+                traj = traj[:T]
+            elif len(traj) < T:
+                # Pad with NaN if shorter
+                padded = np.full(T, np.nan, dtype=np.float64)
+                padded[:len(traj)] = traj
+                traj = padded
             valid = ~np.isnan(traj)
             if valid.any():
                 ax.plot(np.arange(T)[valid], traj[valid], 
@@ -124,6 +143,7 @@ def visualize_comparison(
     if true_paths:
         for i, true_path in enumerate(true_paths):
             if true_path is not None and len(true_path) > 0:
+                true_path = np.asarray(true_path, dtype=np.float64)
                 ax.plot(true_path, color=colors[i % len(colors)], 
                        linestyle='--', linewidth=1.5, alpha=0.5, 
                        label=f'True {i+1}' if i < 2 else None)
