@@ -15,7 +15,20 @@ from tqdm import tqdm
 
 from kymo_tracker.data.multitask_dataset import MultiTaskDataset
 from kymo_tracker.deeplearning.models.multitask import MultiTaskUNet
-from kymo_tracker.utils.device import get_default_device
+from kymo_tracker.utils.device import get_default_device, is_rocm
+
+# Disable cuDNN backend (maps to MIOpen on ROCm) to force PyTorch native BatchNorm
+# This avoids MIOpen kernel compilation issues on certain GPU architectures
+# Only disable on ROCm (AMD GPUs), not on NVIDIA CUDA where cuDNN is beneficial
+if is_rocm() and hasattr(torch.backends, "cudnn"):
+    torch.backends.cudnn.enabled = False
+    import warnings
+    warnings.warn(
+        "cuDNN disabled (ROCm detected). Using PyTorch native BatchNorm to avoid MIOpen compilation issues. "
+        "Performance may be slower than optimized MIOpen kernels.",
+        UserWarning,
+        stacklevel=2
+    )
 
 
 def masked_l1_loss(
@@ -73,6 +86,16 @@ class MultiTaskConfig:
 
 
 def _build_model(config: MultiTaskConfig, max_tracks: int = 3) -> MultiTaskUNet:
+    # Ensure cuDNN/MIOpen is disabled before creating BatchNorm layers (only on ROCm)
+    if is_rocm() and hasattr(torch.backends, "cudnn"):
+        if torch.backends.cudnn.enabled:  # Only warn if it was previously enabled
+            torch.backends.cudnn.enabled = False
+            import warnings
+            warnings.warn(
+                "cuDNN disabled (ROCm detected). Using PyTorch native BatchNorm to avoid MIOpen compilation issues.",
+                UserWarning,
+                stacklevel=2
+            )
     return MultiTaskUNet(
         base_channels=48,
         use_bn=True,
@@ -279,6 +302,17 @@ def load_multitask_model(
 ) -> MultiTaskUNet:
     """Load a trained multi-task model."""
 
+    # Ensure cuDNN/MIOpen is disabled before creating BatchNorm layers (only on ROCm)
+    if is_rocm() and hasattr(torch.backends, "cudnn"):
+        if torch.backends.cudnn.enabled:  # Only warn if it was previously enabled
+            torch.backends.cudnn.enabled = False
+            import warnings
+            warnings.warn(
+                "cuDNN disabled (ROCm detected). Using PyTorch native BatchNorm to avoid MIOpen compilation issues.",
+                UserWarning,
+                stacklevel=2
+            )
+    
     device = device or get_default_device()
     model = MultiTaskUNet(max_tracks=max_tracks).to(device)
 

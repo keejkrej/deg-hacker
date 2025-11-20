@@ -3,6 +3,20 @@
 from __future__ import annotations
 
 import torch
+import warnings
+
+# Disable cuDNN backend (maps to MIOpen on ROCm) to force PyTorch native BatchNorm
+# This must be done before any BatchNorm layers are created
+# Only disable on ROCm (AMD GPUs), not on NVIDIA CUDA
+if hasattr(torch.backends, "cudnn") and (hasattr(torch.version, "hip") or hasattr(torch.backends, "miopen")):
+    torch.backends.cudnn.enabled = False
+    warnings.warn(
+        "cuDNN disabled (ROCm detected). Using PyTorch native BatchNorm to avoid MIOpen compilation issues. "
+        "Performance may be slower than optimized MIOpen kernels.",
+        UserWarning,
+        stacklevel=2
+    )
+
 from torch import nn
 
 

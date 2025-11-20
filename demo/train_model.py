@@ -8,6 +8,21 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root / "src"))
 sys.path.insert(0, str(project_root))
 
+import torch
+import warnings
+
+# Disable cuDNN backend (maps to MIOpen on ROCm) to force PyTorch native BatchNorm
+# This avoids MIOpen kernel compilation issues on certain GPU architectures
+# Only disable on ROCm (AMD GPUs), not on NVIDIA CUDA where cuDNN is beneficial
+if (hasattr(torch.version, "hip") or hasattr(torch.backends, "miopen")) and hasattr(torch.backends, "cudnn"):
+    torch.backends.cudnn.enabled = False
+    warnings.warn(
+        "cuDNN disabled (ROCm detected). Using PyTorch native BatchNorm to avoid MIOpen compilation issues. "
+        "Performance may be slower than optimized MIOpen kernels.",
+        UserWarning,
+        stacklevel=2
+    )
+
 from kymo_tracker.data.multitask_dataset import MultiTaskDataset
 from kymo_tracker.deeplearning.training.multitask import (
     MultiTaskConfig,

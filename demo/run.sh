@@ -96,17 +96,7 @@ echo ""
 echo "Stages to run: $STAGES"
 echo ""
 
-# Check if uv is available
-if ! command -v uv &> /dev/null; then
-    echo "Error: uv is not installed. Please install uv first."
-    echo "Visit: https://github.com/astral-sh/uv"
-    exit 1
-fi
-
-# Ensure dependencies are installed
-echo "Ensuring dependencies are installed..."
-uv sync
-echo ""
+# Note: User should activate their Python environment (conda or venv) before running this script
 
 # Function to run a stage
 run_stage() {
@@ -122,19 +112,19 @@ run_stage() {
     
     case $stage_num in
         1)
-            uv run python demo/generate_data.py --output-dir "$DATA_DIR" "${extra_args[@]}"
+            python demo/generate_data.py --output-dir "$DATA_DIR" "${extra_args[@]}"
             ;;
         2)
-            uv run python demo/train_model.py --model-path "$MODEL_PATH" "${extra_args[@]}"
+            python demo/train_model.py --model-path "$MODEL_PATH" "${extra_args[@]}"
             ;;
         3)
-            uv run python demo/run_classical.py --data-dir "$DATA_DIR" --output-dir "$CLASSICAL_DIR" "${extra_args[@]}"
+            python demo/run_classical.py --data-dir "$DATA_DIR" --output-dir "$CLASSICAL_DIR" "${extra_args[@]}"
             ;;
         4)
-            uv run python demo/run_deeplearning.py --model-path "$MODEL_PATH" --data-dir "$DATA_DIR" --output-dir "$DEEPLEARNING_DIR" "${extra_args[@]}"
+            python demo/run_deeplearning.py --model-path "$MODEL_PATH" --data-dir "$DATA_DIR" --output-dir "$DEEPLEARNING_DIR" "${extra_args[@]}"
             ;;
         5)
-            uv run python demo/visualize.py --data-dir "$DATA_DIR" --classical-dir "$CLASSICAL_DIR" --deeplearning-dir "$DEEPLEARNING_DIR" --output-dir "$OUTPUT_DIR" "${extra_args[@]}"
+            python demo/visualize.py --data-dir "$DATA_DIR" --classical-dir "$CLASSICAL_DIR" --deeplearning-dir "$DEEPLEARNING_DIR" --output-dir "$OUTPUT_DIR" "${extra_args[@]}"
             ;;
         *)
             echo "Unknown stage: $stage_num"
