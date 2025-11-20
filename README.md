@@ -117,7 +117,7 @@ The deep learning pipeline uses a multi-task U-Net that combines denoising and l
 
 3. **Mask creation**: The locator outputs `(center, width)` predictions for each track, which define corridors in the kymograph. These corridors serve as masks for trajectory extraction.
 
-4. **Trajectory linking**: [`track_particles()`](src/kymo_tracker/utils/tracking.py#L616) in [`src/kymo_tracker/utils/tracking.py`](src/kymo_tracker/utils/tracking.py) links trajectories across slices using greedy assignment with overlap prevention and crossing detection.
+4. **Trajectory extraction**: Trajectories are extracted from the predicted masks using subpixel peak finding.
 
 ### Trajectory Analysis
 
