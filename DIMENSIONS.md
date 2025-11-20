@@ -20,10 +20,6 @@ This document lists all dimension specifications used throughout the project.
   - Used as default parameters in `src/kymo_tracker/utils/helpers.py`
   - Matches training window size
 
-### Analysis Functions
-- **Analysis functions**: `16 × 512` (time × space)
-  - Used in `src/kymo_tracker/utils/analysis.py`
-  - Matches training window size
 
 ### Tests
 - **Test datasets**: Various sizes
