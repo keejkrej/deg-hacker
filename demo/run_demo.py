@@ -292,7 +292,7 @@ def main():
         )
         
         config = MultiTaskConfig(
-            epochs=3,  # Reduced epochs for demo
+            epochs=15,
             batch_size=16,
             learning_rate=1.5e-3,
             checkpoint_dir=str(checkpoint_dir),
