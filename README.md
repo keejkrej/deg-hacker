@@ -123,6 +123,14 @@ The deep learning pipeline uses a multi-task U-Net that combines denoising and l
 
 5. **Trajectory extraction**: Trajectories are extracted from the predicted masks using subpixel peak finding.
 
+**Note**: The locator component is still under active development. While the denoiser performs excellently, the locator's trajectory prediction can fail in certain scenarios, particularly for multi-particle cases. See the demo visualization below for an example.
+
+### Demo Visualization
+
+![Demo Comparison](demo.png)
+
+The above visualization shows a comparison between classical (median filtering) and deep learning (U-Net denoising) approaches for tracking three particles with moderate noise. While the U-Net denoiser produces superior denoised images and segmentation masks, the locator component (responsible for extracting trajectories from the masks) still shows failures in trajectory prediction, particularly visible in the bottom-right subplot where two trajectories deviate significantly towards the end of the time series.
+
 ### Trajectory Analysis
 
 Once trajectories are extracted, diffusion coefficient and particle size calculations are performed using functions in [`src/kymo_tracker/utils/helpers.py`](src/kymo_tracker/utils/helpers.py):

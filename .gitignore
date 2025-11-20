@@ -141,6 +141,7 @@ checkpoints/
 # Generated figures (keep structure)
 figures/**/*.png
 *.png
+!demo.png
 
 # Data files
 *.npy
