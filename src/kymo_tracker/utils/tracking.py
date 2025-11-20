@@ -19,9 +19,9 @@ from scipy.ndimage import label as connected_components_label
 from skimage.filters import threshold_otsu
 from scipy.ndimage import gaussian_filter
 
-from kymo_tracker.training.multitask import load_multitask_model
+from kymo_tracker.deeplearning.training.multitask import load_multitask_model
 from kymo_tracker.utils.device import get_default_device
-from kymo_tracker.inference.predict import denoise_and_segment_chunked
+from kymo_tracker.deeplearning.predict import denoise_and_segment_chunked
 from kymo_tracker.utils.analysis import (
     simulate_multi_particle,
     AnalysisMetrics,

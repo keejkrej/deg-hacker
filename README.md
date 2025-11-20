@@ -4,7 +4,7 @@ A modular deep learning toolkit for denoising and tracking multiple particles in
 
 ## Features
 
-- **Modular package**: `kymo_tracker/` contains models, datasets, training, inference, and utilities ready for reuse.
+- **Modular package**: `kymo_tracker/` ships classical utilities plus deep-learning modules with training and inference under the `deeplearning/` namespace.
 - **U-Net Denoising**: Lightweight DDPM-style U-Net predicts noise residuals on 512(space) × 16(time) strips.
 - **Temporal Locator**: CNN + 1D ViT head regresses per-track center/width envelopes instead of dense heatmaps.
 - **Classical Tracking**: Otsu binarization, connected components, DBSCAN clustering, and greedy assignment with overlap prevention.
@@ -41,7 +41,7 @@ Outputs include `denoised.npy`, `centers.npy`, and `widths.npy` for downstream a
 
 ```python
 from kymo_tracker.data.multitask_dataset import MultiTaskDataset
-from kymo_tracker.training.multitask import MultiTaskConfig, train_multitask_model
+from kymo_tracker.deeplearning.training.multitask import MultiTaskConfig, train_multitask_model
 from kymo_tracker.utils.tracking import analyze_multi_particle
 
 # Train programmatically
@@ -63,12 +63,13 @@ metrics = analyze_multi_particle(
 kymo-tracker/
 ├── src/
 │   ├── kymo_tracker/
-│   │   ├── data/           # Datasets and target builders
-│   │   ├── inference/      # Prediction utilities + visualizers
-│   │   ├── models/         # Neural network definitions
-│   │   ├── training/       # Training loops + configs
-│   │   └── utils/          # Analysis, tracking, helper functions
-│   └── main.py             # Typer CLI (train / infer)
+│   │   ├── classical/        # Median/threshold pipelines and helpers
+│   │   ├── deeplearning/     # Neural networks, training, inference
+│   │   │   ├── models/       # Neural network definitions
+│   │   │   ├── inference/    # Prediction utilities + visualizers
+│   │   │   └── training/     # Training loops + configs
+│   │   └── utils/            # Analysis, tracking, helper functions
+│   └── main.py               # Typer CLI (train / infer)
 ├── baseline/               # Classical baselines
 ├── tests/                  # Comprehensive test suite
 ├── requirements.txt

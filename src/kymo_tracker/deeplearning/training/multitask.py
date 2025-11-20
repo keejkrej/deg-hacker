@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from kymo_tracker.data.multitask_dataset import MultiTaskDataset
-from kymo_tracker.models.multitask import MultiTaskUNet
+from kymo_tracker.deeplearning.models.multitask import MultiTaskUNet
 from kymo_tracker.utils.device import get_default_device
 
 

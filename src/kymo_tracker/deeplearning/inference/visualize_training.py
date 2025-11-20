@@ -17,8 +17,8 @@ from typing import Optional
 import shutil
 
 from kymo_tracker.data.multitask_dataset import MultiTaskDataset
-from kymo_tracker.training.multitask import load_multitask_model
-from kymo_tracker.inference.predict import denoise_and_segment_chunked
+from kymo_tracker.deeplearning.training.multitask import load_multitask_model
+from kymo_tracker.deeplearning.predict import denoise_and_segment_chunked
 from kymo_tracker.utils.device import get_default_device
 from kymo_tracker.utils.helpers import get_diffusion_coefficient
 

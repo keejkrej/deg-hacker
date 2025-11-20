@@ -7,13 +7,13 @@ import numpy as np
 import typer
 
 from kymo_tracker.data.multitask_dataset import MultiTaskDataset
-from kymo_tracker.training.multitask import (
+from kymo_tracker.deeplearning.training.multitask import (
     MultiTaskConfig,
     train_multitask_model,
     save_multitask_model,
     load_multitask_model,
 )
-from kymo_tracker.inference.predict import denoise_and_segment_chunked
+from kymo_tracker.deeplearning.predict import denoise_and_segment_chunked
 
 app = typer.Typer(add_completion=False)
 

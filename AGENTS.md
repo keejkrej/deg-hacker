@@ -5,7 +5,7 @@
 
 ## Multi-Particle Tracking
 
-The multi-particle tracking system (`kymo_tracker/models/multitask.py`) uses:
+The multi-particle tracking system (`kymo_tracker/deeplearning/models/multitask.py`) uses:
 - **Otsu binarization** for particle detection (optimal for denoised data)
 - **Connected components** to identify distinct particle blobs
 - **DBSCAN clustering** to merge nearby detections

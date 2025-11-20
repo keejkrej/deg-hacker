@@ -1,8 +1,9 @@
 # %%
 import matplotlib.pyplot as plt
+import numpy as np
 
+from kymo_tracker.classical import classical_median_threshold_tracking
 from kymo_tracker.utils.helpers import (
-    find_max_subpixel,
     get_diffusion_coefficient,
     get_particle_radius,
     estimate_diffusion_msd_fit,
@@ -16,19 +17,23 @@ particle_size = 5  # in nm
 diffusion_coefficient = get_diffusion_coefficient(particle_size)
 x_step = 0.5 # each sample is 0.5µm. This is determined by the microscope pixel size and magnification
 t_step = 1.0 # each time step is 1ms. This is determined by the camera frame rate
-kymograph_noisy, kymograph_gt, true_path = generate_kymograph(length=4000, width=256, 
-                                                              diffusion=diffusion_coefficient, 
+kymograph_noisy, kymograph_gt, true_path = generate_kymograph(length=4000, width=256,
+                                                              diffusion=diffusion_coefficient,
                                                               contrast = 1,
-                                                              noise_level=0.3, 
+                                                              noise_level=0.3,
                                                               peak_width=1, dx=x_step, dt=t_step)
 
-estimated_path = find_max_subpixel(kymograph_noisy) # second dumbest way to estimate path. I should at least have smoothend the data. Your task is to replace this with something smarter!
+classical_result = classical_median_threshold_tracking(kymograph_noisy)
+if classical_result.trajectories:
+    estimated_path = classical_result.trajectories[0]
+else:
+    estimated_path = np.full(kymograph_noisy.shape[0], np.nan)
 
 estimated_diffusion = estimate_diffusion_msd_fit(estimated_path, dx=x_step, dt=t_step)
 estimated_radius = get_particle_radius(estimated_diffusion)
 
 print(f"Estimated Diffusion Coefficient: {estimated_diffusion:.4f} µm²/ms")
-print(f"Estimated Particle Radius: {estimated_radius:.3f} nm") # almost certainly wrong due to dumb path estimation
+print(f"Estimated Particle Radius: {estimated_radius:.3f} nm")
 print(f"True Diffusion Coefficient: {diffusion_coefficient:.4f} µm²/ms")
 print(f"True Particle Radius: {particle_size:.3f} nm")
 
