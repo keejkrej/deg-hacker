@@ -36,8 +36,8 @@ def main():
     parser.add_argument(
         "--n-samples",
         type=int,
-        default=1024,
-        help="Number of training samples (reduced for demo)",
+        default=8192,
+        help="Number of training samples",
     )
     parser.add_argument(
         "--epochs",
