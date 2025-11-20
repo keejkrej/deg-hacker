@@ -26,7 +26,7 @@ def generate_demo_cases(output_dir: Path):
     radius = 10.0
     diffusion = get_diffusion_coefficient(radius)
     noisy, gt, paths = generate_kymograph(
-        length=2000, width=512,
+        length=512, width=512,
         diffusion=diffusion,
         contrast=0.8,
         noise_level=0.15,
@@ -54,7 +54,7 @@ def generate_demo_cases(output_dir: Path):
     radius = 15.0
     diffusion = get_diffusion_coefficient(radius)
     noisy, gt, paths = generate_kymograph(
-        length=2000, width=512,
+        length=512, width=512,
         diffusion=diffusion,
         contrast=0.6,
         noise_level=0.4,
@@ -83,7 +83,7 @@ def generate_demo_cases(output_dir: Path):
     diffusion1 = get_diffusion_coefficient(radius1)
     diffusion2 = get_diffusion_coefficient(radius2)
     noisy, gt, paths = generate_kymograph(
-        length=2000, width=512,
+        length=512, width=512,
         diffusion=[diffusion1, diffusion2],
         contrast=[0.7, 0.5],
         noise_level=0.3,
@@ -104,7 +104,7 @@ def generate_demo_cases(output_dir: Path):
     radii = [5.0, 12.0, 25.0]
     diffusions = [get_diffusion_coefficient(r) for r in radii]
     noisy, gt, paths = generate_kymograph(
-        length=2000, width=512,
+        length=512, width=512,
         diffusion=diffusions,
         contrast=[0.8, 0.6, 0.5],
         noise_level=0.25,
@@ -126,7 +126,7 @@ def generate_demo_cases(output_dir: Path):
     diffusion1 = get_diffusion_coefficient(radius1)
     diffusion2 = get_diffusion_coefficient(radius2)
     noisy, gt, paths = generate_kymograph(
-        length=2000, width=512,
+        length=512, width=512,
         diffusion=[diffusion1, diffusion2],
         contrast=[0.5, 0.4],
         noise_level=0.5,
