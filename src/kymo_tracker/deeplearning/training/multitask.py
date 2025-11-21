@@ -169,9 +169,11 @@ def train_multitask_model(config: MultiTaskConfig, dataset: MultiTaskDataset) ->
             ]
 
             optimizer.zero_grad()
-            pred_noise, pred_heatmap = model(noisy)
+            pred_noise, pred_centers, pred_widths, pred_heatmap = model(noisy, return_heatmap=True)
             denoise_loss = denoise_criterion(pred_noise, true_noise)
             # L2 loss for heatmap prediction
+            # pred_heatmap is (batch, time, space), need to add channel dim to match target_heatmap (batch, 1, time, space)
+            pred_heatmap = pred_heatmap.unsqueeze(1)  # (batch, 1, time, space)
             locator_loss = nn.functional.mse_loss(pred_heatmap, target_heatmap)
 
             adaptive_denoise_weight = config.denoise_loss_weight
