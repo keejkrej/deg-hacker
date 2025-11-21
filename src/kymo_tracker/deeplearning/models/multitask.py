@@ -161,21 +161,19 @@ class DenoiseUNet(nn.Module):
 
 
 class TemporalLocator(nn.Module):
-    """Lightweight temporal locator with 1D ViT-style attention."""
+    """Simple CNN locator: extract features, regress centers/widths directly using 1D conv."""
 
     def __init__(
         self,
         in_channels: int = 1,
-        spatial_channels: int = 96,
-        token_dim: int = 128,
-        num_layers: int = 2,
-        num_heads: int = 4,
+        spatial_channels: int = 48,
         max_tracks: int = 3,
-        max_tokens: int = 512,
     ) -> None:
         super().__init__()
         self.max_tracks = max_tracks
-        self.spatial_encoder = nn.Sequential(
+        
+        # Feature extractor
+        self.features = nn.Sequential(
             nn.Conv2d(in_channels, spatial_channels, kernel_size=3, padding=1),
             nn.BatchNorm2d(spatial_channels),
             nn.ReLU(inplace=True),
@@ -183,41 +181,47 @@ class TemporalLocator(nn.Module):
             nn.BatchNorm2d(spatial_channels),
             nn.ReLU(inplace=True),
         )
-        self.proj = nn.Linear(spatial_channels, token_dim)
-        self.pos_embed = nn.Parameter(torch.zeros(1, max_tokens, token_dim))
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=token_dim,
-            nhead=num_heads,
-            dim_feedforward=token_dim * 4,
-            batch_first=True,
-            activation="gelu",
+        
+        # Process each time frame: use 1D conv along spatial dimension to regress directly
+        self.regressor = nn.Sequential(
+            nn.Conv1d(spatial_channels, spatial_channels, kernel_size=5, padding=2),
+            nn.BatchNorm1d(spatial_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(spatial_channels, max_tracks * 2, kernel_size=1),
         )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        self.head = nn.Linear(token_dim, max_tracks * 2)
-        nn.init.xavier_uniform_(self.head.weight, gain=0.1)
-        nn.init.constant_(self.head.bias, 0.0)
+        
+        nn.init.xavier_uniform_(self.regressor[-1].weight, gain=0.1)
+        nn.init.constant_(self.regressor[-1].bias, 0.0)
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        features = self.spatial_encoder(x)
-        pooled = features.mean(dim=-1)
-        tokens = pooled.permute(0, 2, 1)
-        tokens = self.proj(tokens)
-        seq_len = tokens.size(1)
-        if seq_len > self.pos_embed.size(1):
-            raise ValueError(
-                "TemporalLocator received sequence of length "
-                f"{seq_len} but positional embedding supports up to "
-                f"{self.pos_embed.size(1)}"
-            )
-        tokens = tokens + self.pos_embed[:, :seq_len]
-        encoded = self.transformer(tokens)
-        preds = self.head(encoded)
-        preds = preds.view(encoded.size(0), seq_len, self.max_tracks, 2)
-        preds = preds.permute(0, 2, 3, 1)
-        center_logits = preds[:, :, 0]
-        width_logits = preds[:, :, 1]
-        centers = torch.sigmoid(center_logits)
-        widths = torch.nn.functional.softplus(width_logits) + 1e-3
+        # x: (batch, 1, time=16, space=512)
+        features = self.features(x)  # (batch, channels=48, time=16, space=512)
+        
+        # Process each time frame independently with 1D conv
+        batch_size, channels, time_frames, spatial_pixels = features.shape
+        # Reshape: (batch, channels, time, space) -> (batch*time, channels, space)
+        features_reshaped = features.permute(0, 2, 1, 3).contiguous()  # (batch, time, channels, space)
+        features_reshaped = features_reshaped.view(batch_size * time_frames, channels, spatial_pixels)
+        
+        # Regress: (batch*time, channels, space) -> (batch*time, max_tracks*2, space)
+        preds = self.regressor(features_reshaped)  # (batch*time, max_tracks*2=6, space=512)
+        
+        # Reshape back: (batch*time, max_tracks*2, space) -> (batch, time, max_tracks*2, space)
+        preds = preds.view(batch_size, time_frames, self.max_tracks * 2, spatial_pixels)
+        preds = preds.permute(0, 2, 1, 3)  # (batch, max_tracks*2, time, space)
+        
+        # Split predictions
+        center_logits = preds[:, :self.max_tracks, :, :]  # (batch, max_tracks=3, time=16, space=512)
+        width_logits = preds[:, self.max_tracks:, :, :]   # (batch, max_tracks=3, time=16, space=512)
+        
+        # Centers: argmax over spatial dimension
+        centers = torch.argmax(center_logits, dim=-1).float()  # (batch, max_tracks, time)
+        centers = centers / (spatial_pixels - 1)  # Normalize to [0, 1]
+        
+        # Widths: max over spatial dimension
+        widths = torch.nn.functional.softplus(width_logits).max(dim=-1)[0] + 1e-3  # (batch, max_tracks, time)
+        widths = widths / spatial_pixels  # Normalize
+        
         return centers, widths
 
 
@@ -232,9 +236,6 @@ class MultiTaskUNet(nn.Module):
         dropout: float = 0.0,
         encoder_dropout: float = 0.0,
         decoder_dropout: float = 0.0,
-        locator_token_dim: int = 128,
-        locator_layers: int = 2,
-        locator_heads: int = 4,
     ) -> None:
         super().__init__()
         self.max_tracks = max_tracks
@@ -247,12 +248,8 @@ class MultiTaskUNet(nn.Module):
         )
         self.locator = TemporalLocator(
             in_channels=1,
-            spatial_channels=base_channels * 2,
-            token_dim=locator_token_dim,
-            num_layers=locator_layers,
-            num_heads=locator_heads,
+            spatial_channels=base_channels,
             max_tracks=max_tracks,
-            max_tokens=512,
         )
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
