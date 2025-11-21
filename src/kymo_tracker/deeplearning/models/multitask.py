@@ -3,20 +3,6 @@
 from __future__ import annotations
 
 import torch
-import warnings
-
-# Disable cuDNN backend (maps to MIOpen on ROCm) to force PyTorch native BatchNorm
-# This must be done before any BatchNorm layers are created
-# Only disable on ROCm (AMD GPUs), not on NVIDIA CUDA
-if hasattr(torch.backends, "cudnn") and (hasattr(torch.version, "hip") or hasattr(torch.backends, "miopen")):
-    torch.backends.cudnn.enabled = False
-    warnings.warn(
-        "cuDNN disabled (ROCm detected). Using PyTorch native BatchNorm to avoid MIOpen compilation issues. "
-        "Performance may be slower than optimized MIOpen kernels.",
-        UserWarning,
-        stacklevel=2
-    )
-
 from torch import nn
 
 
@@ -160,6 +146,170 @@ class DenoiseUNet(nn.Module):
         return self.head(d1)
 
 
+class Conv1DBlock(nn.Module):
+    """1D Convolutional block with two conv layers, batch norm, ReLU, and optional dropout."""
+
+    def __init__(
+        self,
+        in_ch: int,
+        out_ch: int,
+        use_bn: bool = True,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        layers = [
+            nn.Conv1d(in_ch, out_ch, kernel_size=3, padding=1),
+            nn.BatchNorm1d(out_ch) if use_bn else nn.Identity(),
+            nn.ReLU(inplace=True),
+            nn.Dropout1d(dropout) if dropout > 0 else nn.Identity(),
+            nn.Conv1d(out_ch, out_ch, kernel_size=3, padding=1),
+            nn.BatchNorm1d(out_ch) if use_bn else nn.Identity(),
+            nn.ReLU(inplace=True),
+        ]
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
+class UNet1D(nn.Module):
+    """1D U-Net for keypoint detection on 1D heatmaps."""
+
+    def __init__(
+        self,
+        in_channels: int = 1,
+        base_channels: int = 32,
+        use_bn: bool = True,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        # Encoder
+        self.enc1 = Conv1DBlock(in_channels, base_channels, use_bn=use_bn, dropout=dropout)
+        self.enc2 = Conv1DBlock(base_channels, base_channels * 2, use_bn=use_bn, dropout=dropout)
+        self.enc3 = Conv1DBlock(base_channels * 2, base_channels * 4, use_bn=use_bn, dropout=dropout)
+        
+        self.down = nn.MaxPool1d(kernel_size=2, stride=2)
+        
+        # Bottleneck
+        self.bottleneck = Conv1DBlock(base_channels * 4, base_channels * 8, use_bn=use_bn, dropout=dropout)
+        
+        # Decoder
+        self.up3 = nn.ConvTranspose1d(
+            base_channels * 8,
+            base_channels * 4,
+            kernel_size=2,
+            stride=2,
+        )
+        self.dec3 = Conv1DBlock(base_channels * 8, base_channels * 4, use_bn=use_bn, dropout=dropout)
+        
+        self.up2 = nn.ConvTranspose1d(
+            base_channels * 4,
+            base_channels * 2,
+            kernel_size=2,
+            stride=2,
+        )
+        self.dec2 = Conv1DBlock(base_channels * 4, base_channels * 2, use_bn=use_bn, dropout=dropout)
+        
+        self.up1 = nn.ConvTranspose1d(
+            base_channels * 2,
+            base_channels,
+            kernel_size=2,
+            stride=2,
+        )
+        self.dec1 = Conv1DBlock(base_channels * 2, base_channels, use_bn=use_bn, dropout=dropout)
+        
+        # Output head: single channel heatmap
+        self.head = nn.Conv1d(base_channels, 1, kernel_size=1)
+        nn.init.xavier_uniform_(self.head.weight, gain=0.1)
+        nn.init.constant_(self.head.bias, 0.0)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (batch, channels, length)
+        e1 = self.enc1(x)
+        e2 = self.enc2(self.down(e1))
+        e3 = self.enc3(self.down(e2))
+        b = self.bottleneck(self.down(e3))
+
+        d3 = self.up3(b)
+        if d3.shape[-1] != e3.shape[-1]:
+            d3 = torch.nn.functional.interpolate(
+                d3,
+                size=e3.shape[-1],
+                mode="linear",
+                align_corners=False,
+            )
+        d3 = torch.cat([d3, e3], dim=1)
+        d3 = self.dec3(d3)
+
+        d2 = self.up2(d3)
+        if d2.shape[-1] != e2.shape[-1]:
+            d2 = torch.nn.functional.interpolate(
+                d2,
+                size=e2.shape[-1],
+                mode="linear",
+                align_corners=False,
+            )
+        d2 = torch.cat([d2, e2], dim=1)
+        d2 = self.dec2(d2)
+
+        d1 = self.up1(d2)
+        if d1.shape[-1] != e1.shape[-1]:
+            d1 = torch.nn.functional.interpolate(
+                d1,
+                size=e1.shape[-1],
+                mode="linear",
+                align_corners=False,
+            )
+        d1 = torch.cat([d1, e1], dim=1)
+        d1 = self.dec1(d1)
+
+        return self.head(d1)
+
+
+class HeatmapLocator(nn.Module):
+    """2D heatmap-based locator: treats keypoint detection as heatmap regression on full 16x512 slice."""
+
+    def __init__(
+        self,
+        in_channels: int = 1,
+        base_channels: int = 32,
+        use_bn: bool = True,
+        dropout: float = 0.0,
+        encoder_dropout: float = 0.0,
+        decoder_dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        # Use 2D U-Net to process full temporal-spatial slice at once
+        # This allows the model to leverage temporal correlations
+        self.unet2d = DenoiseUNet(
+            base_channels=base_channels,
+            use_bn=use_bn,
+            dropout=dropout,
+            encoder_dropout=encoder_dropout,
+            decoder_dropout=decoder_dropout,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Process input and output heatmap.
+        
+        Args:
+            x: (batch, 1, time=16, space=512) input kymograph slice
+            
+        Returns:
+            heatmap: (batch, 1, time=16, space=512) predicted heatmap
+        """
+        # Process full 2D slice at once with 2D U-Net
+        # The DenoiseUNet already handles (batch, channels, time, space) format
+        # We'll use it to predict heatmap instead of noise
+        heatmap = self.unet2d(x)
+        
+        # Ensure non-negative output (heatmaps should be >= 0)
+        heatmap = torch.clamp(heatmap, min=0.0)
+        
+        return heatmap
+
+
 class TemporalLocator(nn.Module):
     """Simple CNN locator: extract features, regress centers/widths directly using 1D conv."""
 
@@ -226,7 +376,7 @@ class TemporalLocator(nn.Module):
 
 
 class MultiTaskUNet(nn.Module):
-    """Wrapper that couples denoising U-Net with a temporal locator."""
+    """Wrapper that couples denoising U-Net with a heatmap-based locator."""
 
     def __init__(
         self,
@@ -236,6 +386,7 @@ class MultiTaskUNet(nn.Module):
         dropout: float = 0.0,
         encoder_dropout: float = 0.0,
         decoder_dropout: float = 0.0,
+        locator_base_channels: int = 32,
     ) -> None:
         super().__init__()
         self.max_tracks = max_tracks
@@ -246,22 +397,38 @@ class MultiTaskUNet(nn.Module):
             encoder_dropout=encoder_dropout,
             decoder_dropout=decoder_dropout,
         )
-        self.locator = TemporalLocator(
+        self.locator = HeatmapLocator(
             in_channels=1,
-            spatial_channels=base_channels,
-            max_tracks=max_tracks,
+            base_channels=locator_base_channels,
+            use_bn=use_bn,
+            dropout=dropout,
+            encoder_dropout=encoder_dropout,
+            decoder_dropout=decoder_dropout,
         )
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Forward pass.
+        
+        Args:
+            x: (batch, 1, time=16, space=512) input kymograph slice
+            
+        Returns:
+            predicted_noise: (batch, 1, time=16, space=512) predicted noise
+            heatmap: (batch, 1, time=16, space=512) predicted heatmap
+        """
         predicted_noise = self.denoiser(x)
         denoised = torch.clamp(x - predicted_noise, 0.0, 1.0)
-        centers, widths = self.locator(denoised.detach())
-        return predicted_noise, centers, widths
+        heatmap = self.locator(denoised.detach())
+        return predicted_noise, heatmap
 
 
 __all__ = [
     "ConvBlock",
+    "Conv1DBlock",
     "DenoiseUNet",
+    "UNet1D",
     "TemporalLocator",
+    "HeatmapLocator",
     "MultiTaskUNet",
 ]

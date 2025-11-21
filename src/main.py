@@ -38,7 +38,7 @@ app = typer.Typer(add_completion=False)
 @app.command()
 def train(
     samples: int = typer.Option(16384, help="Number of synthetic samples to generate."),
-    epochs: int = typer.Option(20, help="Number of training epochs."),
+    epochs: int = typer.Option(6, help="Number of training epochs."),
     batch_size: int = typer.Option(32, help="Batch size for training."),
     checkpoint_dir: Path = typer.Option(Path("checkpoints"), help="Directory for checkpoints."),
     save_model_path: Path = typer.Option(

@@ -67,10 +67,38 @@ def visualize_training_example(
     from kymo_tracker.deeplearning.predict import process_slice_independently
     model.eval()
     with torch.no_grad():
-        slice_result = process_slice_independently(model, noisy, device=device)
+        slice_result = process_slice_independently(model, noisy, device=device, max_tracks=n_tracks)
     denoised = slice_result["denoised"]
-    pred_centers = slice_result["centers"]
-    pred_widths = slice_result["widths"]
+    trajectories = slice_result["trajectories"]
+    heatmap = slice_result.get("heatmap", np.zeros_like(noisy))
+    
+    # Derive centers/widths from trajectories for visualization
+    pred_centers = np.full((time_len, n_tracks), np.nan, dtype=np.float32)
+    pred_widths = np.full((time_len, n_tracks), np.nan, dtype=np.float32)
+    
+    for track_idx, traj in enumerate(trajectories):
+        if track_idx < n_tracks:
+            pred_centers[:, track_idx] = traj
+            # Estimate width from heatmap (FWHM around peak)
+            for t in range(time_len):
+                if not np.isnan(traj[t]):
+                    center_px = int(np.round(traj[t]))
+                    center_px = np.clip(center_px, 0, space_len - 1)
+                    # Find width at half maximum
+                    peak_value = heatmap[t, center_px]
+                    if peak_value > 0:
+                        threshold = peak_value * 0.5
+                        # Find left and right boundaries
+                        left_idx = center_px
+                        while left_idx > 0 and heatmap[t, left_idx] > threshold:
+                            left_idx -= 1
+                        right_idx = center_px
+                        while right_idx < space_len - 1 and heatmap[t, right_idx] > threshold:
+                            right_idx += 1
+                        width_px = right_idx - left_idx
+                        if width_px > 0:
+                            pred_widths[t, track_idx] = width_px
+    
     pred_centers = np.clip(pred_centers, 0.0, space_len - 1)
     pred_widths = np.clip(pred_widths, 0.0, space_len)
 

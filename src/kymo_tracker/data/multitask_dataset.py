@@ -11,14 +11,12 @@ from kymo_tracker.utils.helpers import generate_kymograph, get_diffusion_coeffic
 
 
 class MultiTaskDataset(Dataset):
-    """Dataset for training multi-task denoising + locator model.
+    """Dataset for training multi-task denoising + heatmap locator model.
     
     Generates synthetic kymograph windows with multiple particles and returns:
     - noisy: noisy input kymograph (1, height, width)
     - true_noise: the noise that was added (1, height, width)
-    - target_pos: target center positions (max_trajectories, window_length)
-    - target_width: target widths (max_trajectories, window_length)
-    - valid_mask: mask indicating valid tracks (max_trajectories, window_length)
+    - target_heatmap: target heatmap with Gaussians at peak locations (1, height, width)
     """
 
     def __init__(
@@ -60,6 +58,9 @@ class MultiTaskDataset(Dataset):
         self.mask_peak_width_samples = mask_peak_width_samples
         # Use fixed particle width for denoiser training, separate from locator target
         self.particle_peak_width_samples = particle_peak_width_samples if particle_peak_width_samples is not None else 2.0
+        # Gaussian sigma for heatmap generation (in pixels)
+        # Use mask_peak_width_samples as a proxy for Gaussian width
+        self.heatmap_sigma = mask_peak_width_samples / 2.355  # Convert FWHM to sigma
         
         # Normalize ranges
         if isinstance(radii_nm, (int, float)):
@@ -86,11 +87,40 @@ class MultiTaskDataset(Dataset):
     def __len__(self) -> int:
         return self.n_samples
 
+    def _create_heatmap(self, paths: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
+        """Create a heatmap with Gaussians centered on peak locations.
+        
+        Args:
+            paths: (n_trajectories, window_length) array of peak positions in pixels
+            shape: (window_length, width) shape of the output heatmap
+            
+        Returns:
+            heatmap: (window_length, width) array with Gaussians at peak locations
+        """
+        window_length, width = shape
+        heatmap = np.zeros((window_length, width), dtype=np.float32)
+        
+        # Create spatial coordinate array
+        x = np.arange(width, dtype=np.float32)
+        
+        for t in range(window_length):
+            for traj_idx in range(paths.shape[0]):
+                center_px = paths[traj_idx, t]
+                if np.isnan(center_px) or center_px < 0 or center_px >= width:
+                    continue
+                
+                # Create Gaussian centered at center_px
+                gaussian = np.exp(-0.5 * ((x - center_px) / self.heatmap_sigma) ** 2)
+                # Add to heatmap (use max to handle overlapping peaks)
+                heatmap[t, :] = np.maximum(heatmap[t, :], gaussian)
+        
+        return heatmap
+
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, ...]:
         """Generate a single training sample.
         
         Returns:
-            Tuple of (noisy, true_noise, target_pos, target_width, valid_mask)
+            Tuple of (noisy, true_noise, target_heatmap)
         """
         # Determine number of trajectories
         if np.random.rand() < self.multi_trajectory_prob:
@@ -131,75 +161,16 @@ class MultiTaskDataset(Dataset):
         # Compute true noise
         true_noise_window = noisy_window - gt_window
         
-        # Extract actual widths from ground truth kymograph
-        # For each trajectory, compute the width from the Gaussian profile in gt_window
-        actual_widths = np.full((n_trajectories, self.window_length), np.nan, dtype=np.float32)
-        for i in range(n_trajectories):
-            for t in range(self.window_length):
-                center_px = paths_window[i, t]
-                if np.isnan(center_px) or center_px < 0 or center_px >= self.width:
-                    continue
-                
-                # Extract the 1D profile at time t
-                profile = gt_window[t, :]
-                
-                # Find the peak value at the center
-                center_idx = int(np.round(center_px))
-                center_idx = np.clip(center_idx, 0, self.width - 1)
-                peak_value = profile[center_idx]
-                
-                if peak_value <= 0:
-                    continue
-                
-                # Find width at half maximum (FWHM) or at a threshold
-                # For Gaussian: FWHM ≈ 2.355 * sigma, but we'll measure it directly
-                threshold = peak_value * 0.5  # Half maximum
-                
-                # Find left and right boundaries
-                left_idx = center_idx
-                while left_idx > 0 and profile[left_idx] > threshold:
-                    left_idx -= 1
-                right_idx = center_idx
-                while right_idx < self.width - 1 and profile[right_idx] > threshold:
-                    right_idx += 1
-                
-                # Width is the distance between boundaries
-                width_px = right_idx - left_idx
-                if width_px > 0:
-                    actual_widths[i, t] = width_px
-        
-        # Prepare target positions and widths
-        # Shape: (max_trajectories, window_length)
-        # NOTE: Model outputs normalized values (centers: [0,1], widths: normalized by width)
-        # So we need to normalize targets to match model output format
-        target_pos = np.full((self.max_trajectories, self.window_length), np.nan, dtype=np.float32)
-        target_width = np.full((self.max_trajectories, self.window_length), np.nan, dtype=np.float32)
-        valid_mask = np.zeros((self.max_trajectories, self.window_length), dtype=np.float32)
-        
-        for i in range(n_trajectories):
-            # Normalize positions: pixel [0, width-1] -> normalized [0, 1]
-            target_pos[i, :] = paths_window[i, :] / (self.width - 1)
-            # Use actual widths from simulation, fallback to fixed width if not available
-            widths_to_use = actual_widths[i, :]
-            # Replace NaN with fallback width
-            widths_to_use = np.where(np.isnan(widths_to_use), 
-                                    self.mask_peak_width_samples, 
-                                    widths_to_use)
-            # Normalize widths: pixels -> normalized (divide by width)
-            target_width[i, :] = widths_to_use / self.width
-            valid_mask[i, :] = 1.0
+        # Create heatmap target with Gaussians at peak locations
+        target_heatmap = self._create_heatmap(paths_window, (self.window_length, self.width))
         
         # Convert to tensors and add channel dimension
         noisy_tensor = torch.from_numpy(noisy_window).float().unsqueeze(0)  # (1, window_length, width)
         true_noise_tensor = torch.from_numpy(true_noise_window).float().unsqueeze(0)  # (1, window_length, width)
-        target_pos_tensor = torch.from_numpy(target_pos).float()  # (max_trajectories, window_length)
-        target_width_tensor = torch.from_numpy(target_width).float()  # (max_trajectories, window_length)
-        valid_mask_tensor = torch.from_numpy(valid_mask).float()  # (max_trajectories, window_length)
+        target_heatmap_tensor = torch.from_numpy(target_heatmap).float().unsqueeze(0)  # (1, window_length, width)
         
         return (
             noisy_tensor,
             true_noise_tensor,
-            target_pos_tensor,
-            target_width_tensor,
-            valid_mask_tensor,
+            target_heatmap_tensor,
         )

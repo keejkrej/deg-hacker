@@ -112,31 +112,43 @@ The function returns a `ClassicalTrackingResult` containing filtered images, mas
 
 The deep learning pipeline uses a multi-task U-Net that combines denoising and localization:
 
-1. **Model architecture**: [`MultiTaskUNet`](src/kymo_tracker/deeplearning/models/multitask.py#L210) in [`src/kymo_tracker/deeplearning/models/multitask.py`](src/kymo_tracker/deeplearning/models/multitask.py) consists of:
-   - **Denoiser**: [`DenoiseUNet`](src/kymo_tracker/deeplearning/models/multitask.py#L60) - a tiny U-Net that predicts noise residuals (DDPM-style)
-   - **Locator**: [`TemporalLocator`](src/kymo_tracker/deeplearning/models/multitask.py#L149) - CNN + 1D ViT head that regresses per-track `(center, width)` trajectories
+1. **Model architecture**: [`MultiTaskUNet`](src/kymo_tracker/deeplearning/models/multitask.py#L394) in [`src/kymo_tracker/deeplearning/models/multitask.py`](src/kymo_tracker/deeplearning/models/multitask.py) consists of:
+   - **Denoiser**: [`DenoiseUNet`](src/kymo_tracker/deeplearning/models/multitask.py#L49) - a tiny U-Net that predicts noise residuals (DDPM-style)
+   - **Locator**: [`HeatmapLocator`](src/kymo_tracker/deeplearning/models/multitask.py#L283) - a 2D U-Net that treats keypoint detection as heatmap regression on the full `16×512` slice
 
-2. **Per-slice processing**: [`process_slice_independently()`](src/kymo_tracker/deeplearning/predict.py) processes each `16×512` slice independently:
-   - Applies the model to each slice
-   - Creates masks and extracts trajectories from each slice
+2. **Heatmap-based keypoint detection**: The locator predicts a 1D heatmap for each time frame where particle peaks are represented as Gaussians. This approach:
+   - Processes the full `16×512` temporal-spatial slice at once, leveraging temporal correlations
+   - Learns a denoising prior implicitly, turning "find needles in a noisy haystack" into "draw glowing blobs where the needles are"
+   - Is stable against amplitude variation, variable peak width, and missing data
+   - Uses L2 loss between predicted and ground truth heatmaps during training
+
+3. **Per-slice processing**: [`process_slice_independently()`](src/kymo_tracker/deeplearning/predict.py) processes each `16×512` slice independently:
+   - Applies the model to each slice to get denoised output and heatmap
+   - Extracts peaks from the heatmap using argmax + non-maximum suppression
    - Returns trajectories for that slice only
    
-3. **Trajectory linking**: [`link_trajectories_across_slices()`](src/kymo_tracker/deeplearning/predict.py) links trajectories across overlapping slices:
+4. **Trajectory linking**: [`link_trajectories_across_slices()`](src/kymo_tracker/deeplearning/predict.py) links trajectories across overlapping slices:
    - Connects trajectory segments from different slices
    - Handles overlaps by averaging values in overlap regions
    - Returns full-length linked trajectories
 
-4. **Mask creation**: The locator outputs `(center, width)` predictions for each track, which define corridors in the kymograph. These corridors serve as masks for trajectory extraction.
+5. **Peak extraction**: [`extract_peaks_from_heatmap()`](src/kymo_tracker/deeplearning/predict.py) extracts 1-3 peaks per time frame from the predicted heatmap:
+   - Finds local maxima with non-maximum suppression
+   - Applies subpixel refinement using quadratic interpolation
+   - Sorts peaks by intensity and selects the top peaks
 
-5. **Trajectory extraction**: Trajectories are extracted from the predicted masks using subpixel peak finding.
-
-**Note**: The locator component is still under active development. While the denoiser performs excellently, the locator's trajectory prediction can fail in certain scenarios, particularly for multi-particle cases. See the demo visualization below for an example.
+**Current Status**: The locator works well for **single particle tracking under moderate noise conditions**. Performance for multi-particle scenarios and high noise conditions is still being improved.
 
 ### Demo Visualization
 
 ![Demo Comparison](demo.png)
 
-The above visualization shows a comparison between classical (median filtering) and deep learning (U-Net denoising) approaches for tracking three particles with moderate noise. While the U-Net denoiser produces superior denoised images and segmentation masks, the locator component (responsible for extracting trajectories from the masks) still shows failures in trajectory prediction, particularly visible in the bottom-right subplot where two trajectories deviate significantly towards the end of the time series.
+The above visualization shows a comparison between classical (median filtering) and deep learning (U-Net denoising + heatmap-based locator) approaches. The top row demonstrates tracking a single particle under high noise conditions, while the bottom row shows moderate noise conditions. The deep learning pipeline successfully:
+- **Denoises** the input using the U-Net denoiser (bottom row, column 2)
+- **Segments** particle regions using the predicted heatmap (bottom row, column 3)
+- **Tracks** the particle trajectory accurately (bottom row, column 4)
+
+The heatmap-based locator architecture enables stable keypoint detection that works reliably for single particle tracking under moderate noise conditions.
 
 ### Trajectory Analysis
 
@@ -152,7 +164,7 @@ The pipeline is exposed via a Typer CLI in [`src/main.py`](src/main.py):
 
 **Training**:
 ```bash
-uv run python src/main.py train --samples 16384 --epochs 20 --checkpoint-dir checkpoints
+uv run python src/main.py train --samples 16384 --epochs 6 --checkpoint-dir checkpoints
 ```
 
 **Inference**:
@@ -237,7 +249,7 @@ See [`demo/README.md`](demo/README.md) for detailed information about running th
 
 The demo includes:
 - **Stage 1**: Generate 5 synthetic test cases (`512×512` kymographs)
-- **Stage 2**: Train the deep learning model (default: 16384 samples, 20 epochs)
+- **Stage 2**: Train the deep learning model (default: 16384 samples, 6 epochs)
 - **Stage 3**: Run classical inference pipeline
 - **Stage 4**: Run deep learning inference pipeline
 - **Stage 5**: Create comparison visualizations

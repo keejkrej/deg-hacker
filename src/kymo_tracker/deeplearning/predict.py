@@ -6,21 +6,95 @@ from typing import Optional, Tuple, List
 
 import numpy as np
 import torch
-import warnings
-
-# Disable cuDNN backend (maps to MIOpen on ROCm) to force PyTorch native BatchNorm
-# This avoids MIOpen kernel compilation issues on certain GPU architectures
-# Only disable on ROCm (AMD GPUs), not on NVIDIA CUDA where cuDNN is beneficial
-if (hasattr(torch.version, "hip") or hasattr(torch.backends, "miopen")) and hasattr(torch.backends, "cudnn"):
-    torch.backends.cudnn.enabled = False
-    warnings.warn(
-        "cuDNN disabled (ROCm detected). Using PyTorch native BatchNorm to avoid MIOpen compilation issues. "
-        "Performance may be slower than optimized MIOpen kernels.",
-        UserWarning,
-        stacklevel=2
-    )
 
 from kymo_tracker.deeplearning.models.multitask import MultiTaskUNet
+
+
+def extract_peaks_from_heatmap(
+    heatmap: np.ndarray,
+    max_peaks: int = 3,
+    min_peak_value: float = 0.1,
+    nms_window: int = 5,
+) -> list[np.ndarray]:
+    """
+    Extract peaks from heatmap using argmax + non-maximum suppression.
+    
+    Args:
+        heatmap: (T, W) heatmap array
+        max_peaks: Maximum number of peaks to extract per time frame
+        min_peak_value: Minimum peak value threshold
+        nms_window: Window size for non-maximum suppression (in pixels)
+        
+    Returns:
+        trajectories: List of (T,) arrays, one per track
+    """
+    T, W = heatmap.shape
+    trajectories = []
+    
+    # Initialize trajectories
+    for _ in range(max_peaks):
+        trajectories.append(np.full(T, np.nan, dtype=np.float32))
+    
+    for t in range(T):
+        row = heatmap[t, :]
+        
+        # Find local maxima
+        peaks = []
+        peak_values = []
+        
+        # Apply threshold
+        thresholded = row >= min_peak_value
+        
+        if not thresholded.any():
+            continue
+        
+        # Find local maxima with non-maximum suppression
+        for i in range(1, W - 1):
+            if not thresholded[i]:
+                continue
+            
+            # Check if it's a local maximum
+            if row[i] >= row[i-1] and row[i] >= row[i+1]:
+                # Check NMS: ensure no nearby peak is higher
+                is_max = True
+                for j in range(max(0, i - nms_window), min(W, i + nms_window + 1)):
+                    if j != i and row[j] > row[i]:
+                        is_max = False
+                        break
+                
+                if is_max:
+                    # Subpixel refinement using quadratic interpolation
+                    if 0 < i < W - 1:
+                        y0, y1, y2 = row[i-1], row[i], row[i+1]
+                        denom = (y0 - 2*y1 + y2)
+                        if denom != 0:
+                            delta = 0.5 * (y0 - y2) / denom
+                            peak_pos = i + delta
+                        else:
+                            peak_pos = float(i)
+                    else:
+                        peak_pos = float(i)
+                    
+                    peaks.append(peak_pos)
+                    peak_values.append(row[i])
+        
+        # Sort by peak value and take top max_peaks
+        if peaks:
+            sorted_indices = np.argsort(peak_values)[::-1]
+            sorted_peaks = [peaks[i] for i in sorted_indices[:max_peaks]]
+            
+            for track_idx, peak_pos in enumerate(sorted_peaks):
+                if track_idx < max_peaks:
+                    trajectories[track_idx][t] = peak_pos
+    
+    # Remove trajectories that are all NaN
+    trajectories = [traj for traj in trajectories if np.any(~np.isnan(traj))]
+    
+    # Ensure at least one trajectory
+    if not trajectories:
+        trajectories.append(np.full(T, np.nan))
+    
+    return trajectories
 
 
 def create_mask_from_centers_widths(
@@ -131,23 +205,28 @@ def process_slice_independently(
     model: MultiTaskUNet,
     kymograph_slice: np.ndarray,
     device: Optional[str] = None,
+    max_tracks: int = 3,
+    min_peak_value: float = 0.1,
+    nms_window: int = 5,
 ) -> dict:
     """
-    Process a single 16x512 slice independently and extract trajectories.
+    Process a single 16x512 slice independently and extract trajectories from heatmap.
     
     Args:
         model: Multi-task model
         kymograph_slice: (T, W) kymograph slice (typically 16x512)
         device: Device to run model on
+        max_tracks: Maximum number of tracks to extract
+        min_peak_value: Minimum peak value threshold for heatmap
+        nms_window: Window size for non-maximum suppression (in pixels)
         
     Returns:
         Dictionary with:
         - 'denoised': (T, W) denoised slice
         - 'trajectories': List of (T,) trajectory arrays
-        - 'centers': (T, N_tracks) center predictions
-        - 'widths': (T, N_tracks) width predictions
-        - 'mask': (T, W) boolean mask
-        - 'labeled_mask': (T, W) labeled mask
+        - 'heatmap': (T, W) predicted heatmap
+        - 'mask': (T, W) boolean mask (derived from heatmap)
+        - 'labeled_mask': (T, W) labeled mask (derived from heatmap)
     """
     if device is None:
         device = next(model.parameters()).device.type
@@ -164,10 +243,10 @@ def process_slice_independently(
             padded_slice = kymograph_slice[:16]  # Take first 16 frames
         
         input_tensor = torch.from_numpy(padded_slice).unsqueeze(0).unsqueeze(0).float().to(device)
-        pred_noise, pred_centers, pred_widths = model(input_tensor)
+        pred_noise, pred_heatmap = model(input_tensor)
         
         # Check for NaN outputs
-        if torch.isnan(pred_noise).any():
+        if torch.isnan(pred_noise).any() or torch.isnan(pred_heatmap).any():
             import warnings
             warnings.warn(
                 "Model output contains NaN values. Model may not be properly trained. "
@@ -175,49 +254,46 @@ def process_slice_independently(
                 UserWarning
             )
             denoised_slice = kymograph_slice.copy()
-            max_tracks = pred_centers.shape[1] if pred_centers.ndim > 1 else 1
-            centers_px = np.full((T, max_tracks), W / 2, dtype=np.float32)
-            widths_px = np.full((T, max_tracks), W * 0.1, dtype=np.float32)
+            heatmap_np = np.zeros((T, W), dtype=np.float32)
         else:
             denoised_chunk = torch.clamp(input_tensor - pred_noise, 0.0, 1.0).squeeze().cpu().numpy()
             denoised_slice = denoised_chunk[:T]  # Trim to actual length
             
-            centers_np = pred_centers.squeeze(0).cpu().numpy().transpose(1, 0)
-            widths_np = pred_widths.squeeze(0).cpu().numpy().transpose(1, 0)
-            centers_px = (centers_np * (W - 1))[:T]  # Trim to actual length
-            widths_px = (widths_np * W)[:T]  # Trim to actual length
+            heatmap_chunk = pred_heatmap.squeeze().cpu().numpy()
+            heatmap_np = heatmap_chunk[:T]  # Trim to actual length
         
-        del input_tensor, pred_noise, pred_centers, pred_widths
+        del input_tensor, pred_noise, pred_heatmap
         if str(device).startswith("cuda"):
             torch.cuda.empty_cache()
     
-    # Create mask from centers/widths
-    mask, labeled_mask = create_mask_from_centers_widths(
-        centers_px, widths_px, kymograph_slice.shape
+    # Extract peaks from heatmap
+    trajectories = extract_peaks_from_heatmap(
+        heatmap_np,
+        max_peaks=max_tracks,
+        min_peak_value=min_peak_value,
+        nms_window=nms_window,
     )
     
-    # Extract trajectories from this slice
-    n_tracks = centers_px.shape[1] if centers_px.ndim > 1 else 1
-    trajectories = extract_trajectories_from_mask(
-        kymograph_slice, labeled_mask, n_tracks
-    )
+    # Create masks from trajectories for visualization
+    mask = np.zeros((T, W), dtype=bool)
+    labeled_mask = np.zeros((T, W), dtype=int)
     
-    # Fallback to centers if mask extraction failed
-    all_nan = all(np.all(np.isnan(traj)) for traj in trajectories)
-    if all_nan and centers_px.ndim > 1:
-        trajectories = []
-        for track_idx in range(n_tracks):
-            track_centers = centers_px[:, track_idx].copy()
-            if np.any(~np.isnan(track_centers)):
-                trajectories.append(track_centers)
-        if not trajectories:
-            trajectories.append(np.full(T, np.nan))
+    for track_idx, traj in enumerate(trajectories):
+        for t in range(T):
+            if not np.isnan(traj[t]):
+                center_px = int(np.round(traj[t]))
+                center_px = np.clip(center_px, 0, W - 1)
+                # Create a small window around the peak
+                window_size = max(1, nms_window)
+                start_x = max(0, center_px - window_size)
+                end_x = min(W, center_px + window_size + 1)
+                mask[t, start_x:end_x] = True
+                labeled_mask[t, start_x:end_x] = track_idx + 1
     
     return {
         'denoised': denoised_slice,
         'trajectories': trajectories,
-        'centers': centers_px,
-        'widths': widths_px,
+        'heatmap': heatmap_np,
         'mask': mask,
         'labeled_mask': labeled_mask,
     }
@@ -228,6 +304,7 @@ def link_trajectories_across_slices(
     chunk_size: int = 16,
     overlap: int = 8,
     max_jump: float = 10.0,
+    total_length: Optional[int] = None,
 ) -> List[np.ndarray]:
     """
     Link trajectories across overlapping slices using greedy assignment.
@@ -238,6 +315,7 @@ def link_trajectories_across_slices(
         chunk_size: Size of each chunk (default 16)
         overlap: Overlap between chunks (default 8)
         max_jump: Maximum allowed jump in position between slices (in pixels)
+        total_length: Total length of the full kymograph. If None, calculated from slice boundaries.
         
     Returns:
         List of linked trajectories, one per track
@@ -266,6 +344,17 @@ def link_trajectories_across_slices(
         slice_ends.append(end)
         start += step
     
+    # Calculate actual total length from the last slice's actual end position
+    # The last slice might be shorter than chunk_size
+    if total_length is None:
+        # Infer from the last slice's trajectory length
+        if slice_trajectories_list[-1] and len(slice_trajectories_list[-1]) > 0:
+            last_traj_len = len(slice_trajectories_list[-1][0])
+            total_length = slice_starts[-1] + last_traj_len
+        else:
+            # Fallback: use slice boundary calculation but cap at reasonable value
+            total_length = slice_ends[-1]
+    
     # Initialize linked trajectories
     linked_trajectories = []
     
@@ -276,12 +365,13 @@ def link_trajectories_across_slices(
             if track_idx < len(trajs):
                 traj = trajs[track_idx]
                 start = slice_starts[slice_idx]
-                end = slice_ends[slice_idx]
+                # Use actual trajectory length, not theoretical end
+                actual_end = start + len(traj)
                 # Store segment with its time range
                 segments.append({
                     'trajectory': traj,
                     'start': start,
-                    'end': end,
+                    'end': actual_end,
                     'slice_idx': slice_idx,
                 })
         
@@ -290,7 +380,6 @@ def link_trajectories_across_slices(
             continue
         
         # Simple linking: concatenate segments, handling overlaps by taking average
-        total_length = slice_ends[-1]
         linked_traj = np.full(total_length, np.nan, dtype=np.float64)
         
         for seg in segments:
@@ -314,13 +403,13 @@ def link_trajectories_across_slices(
     
     # Ensure at least one trajectory
     if not linked_trajectories:
-        total_length = slice_ends[-1] if slice_ends else chunk_size
         linked_trajectories.append(np.full(total_length, np.nan))
     
     return linked_trajectories
 
 
 __all__ = [
+    "extract_peaks_from_heatmap",
     "create_mask_from_centers_widths",
     "extract_trajectories_from_mask",
     "process_slice_independently",

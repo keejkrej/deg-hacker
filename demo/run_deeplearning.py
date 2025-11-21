@@ -52,6 +52,7 @@ def run_deeplearning_pipeline(kymograph_noisy, model, device):
         slice_trajectories_list,
         chunk_size=chunk_size,
         overlap=overlap,
+        total_length=T,  # Pass actual kymograph length
     )
     
     # Reconstruct full denoised kymograph and masks (for visualization)
@@ -84,37 +85,65 @@ def run_deeplearning_pipeline(kymograph_noisy, model, device):
     
     denoised_full = np.divide(denoised_full, weights, out=np.zeros_like(denoised_full), where=weights > 0)
     
-    # Reconstruct centers/widths for compatibility (blended across slices)
-    # This is mainly for visualization/debugging
-    centers_full = None
-    widths_full = None
-    temporal_weights = np.zeros((T, 1), dtype=np.float32)
+    # Reconstruct heatmap (blended across slices)
+    heatmap_full = np.zeros((T, W), dtype=np.float32)
+    weights_heatmap = np.zeros((T, W), dtype=np.float32)
     
     start = 0
     for i, result in enumerate(slice_results):
         end = min(start + chunk_size, T)
         actual_len = end - start
         
-        if centers_full is None:
-            n_tracks = result['centers'].shape[1] if result['centers'].ndim > 1 else 1
-            centers_full = np.zeros((T, n_tracks), dtype=np.float32)
-            widths_full = np.zeros((T, n_tracks), dtype=np.float32)
-        
         weight_chunk = window[:actual_len, np.newaxis]
-        centers_full[start:end] += result['centers'] * weight_chunk
-        widths_full[start:end] += result['widths'] * weight_chunk
-        temporal_weights[start:end] += weight_chunk
+        heatmap_full[start:end] += result['heatmap'] * weight_chunk
+        weights_heatmap[start:end] += weight_chunk
         
         start += chunk_size - overlap
     
-    centers_full = np.divide(centers_full, temporal_weights, out=np.zeros_like(centers_full), where=temporal_weights > 0)
-    widths_full = np.divide(widths_full, temporal_weights, out=np.zeros_like(widths_full), where=temporal_weights > 0)
+    heatmap_full = np.divide(heatmap_full, weights_heatmap, out=np.zeros_like(heatmap_full), where=weights_heatmap > 0)
+    
+    # Derive centers/widths from trajectories for backward compatibility
+    n_tracks = len(linked_trajectories)
+    centers_full = np.full((T, n_tracks), np.nan, dtype=np.float32)
+    widths_full = np.full((T, n_tracks), np.nan, dtype=np.float32)
+    
+    for track_idx, traj in enumerate(linked_trajectories):
+        # Trim or pad trajectory to match kymograph length
+        if len(traj) > T:
+            traj_trimmed = traj[:T]
+        elif len(traj) < T:
+            # Pad with NaN if trajectory is shorter
+            traj_trimmed = np.full(T, np.nan, dtype=traj.dtype)
+            traj_trimmed[:len(traj)] = traj
+        else:
+            traj_trimmed = traj
+        centers_full[:, track_idx] = traj_trimmed
+        # Estimate width from heatmap (FWHM around peak)
+        for t in range(T):
+            if not np.isnan(traj_trimmed[t]):
+                center_px = int(np.round(traj_trimmed[t]))
+                center_px = np.clip(center_px, 0, W - 1)
+                # Find width at half maximum
+                peak_value = heatmap_full[t, center_px]
+                if peak_value > 0:
+                    threshold = peak_value * 0.5
+                    # Find left and right boundaries
+                    left_idx = center_px
+                    while left_idx > 0 and heatmap_full[t, left_idx] > threshold:
+                        left_idx -= 1
+                    right_idx = center_px
+                    while right_idx < W - 1 and heatmap_full[t, right_idx] > threshold:
+                        right_idx += 1
+                    width_px = right_idx - left_idx
+                    if width_px > 0:
+                        widths_full[t, track_idx] = width_px
     
     return {
         'denoised': denoised_full,
         'mask': mask_full,
         'labeled_mask': labeled_mask_full,
         'trajectories': linked_trajectories,
+        'heatmap': heatmap_full,
         'centers': centers_full,
         'widths': widths_full,
     }
@@ -199,6 +228,7 @@ def main():
         np.save(case_output_dir / "mask.npy", result['mask'])
         np.save(case_output_dir / "labeled_mask.npy", result['labeled_mask'])
         np.save(case_output_dir / "trajectories.npy", np.array(result['trajectories'], dtype=object))
+        np.save(case_output_dir / "heatmap.npy", result['heatmap'])
         np.save(case_output_dir / "centers.npy", result['centers'])
         np.save(case_output_dir / "widths.npy", result['widths'])
         

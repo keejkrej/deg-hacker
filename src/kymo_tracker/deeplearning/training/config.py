@@ -1,7 +1,7 @@
 """Shared training configuration constants."""
 
 # Training defaults
-DEFAULT_EPOCHS = 20
+DEFAULT_EPOCHS = 6
 DEFAULT_SAMPLES = 16384
 DEFAULT_BATCH_SIZE = 32
 DEFAULT_MASK_PEAK_WIDTH_SAMPLES = 10.0

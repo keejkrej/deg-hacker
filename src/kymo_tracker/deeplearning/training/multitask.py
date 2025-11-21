@@ -15,20 +15,7 @@ from tqdm import tqdm
 
 from kymo_tracker.data.multitask_dataset import MultiTaskDataset
 from kymo_tracker.deeplearning.models.multitask import MultiTaskUNet
-from kymo_tracker.utils.device import get_default_device, is_rocm
-
-# Disable cuDNN backend (maps to MIOpen on ROCm) to force PyTorch native BatchNorm
-# This avoids MIOpen kernel compilation issues on certain GPU architectures
-# Only disable on ROCm (AMD GPUs), not on NVIDIA CUDA where cuDNN is beneficial
-if is_rocm() and hasattr(torch.backends, "cudnn"):
-    torch.backends.cudnn.enabled = False
-    import warnings
-    warnings.warn(
-        "cuDNN disabled (ROCm detected). Using PyTorch native BatchNorm to avoid MIOpen compilation issues. "
-        "Performance may be slower than optimized MIOpen kernels.",
-        UserWarning,
-        stacklevel=2
-    )
+from kymo_tracker.utils.device import get_default_device
 
 
 def masked_l1_loss(
@@ -61,8 +48,6 @@ class MultiTaskConfig:
     learning_rate: float = 1e-3
     denoise_loss_weight: float = 1.0
     locator_loss_weight: float = 2.0
-    locator_center_weight: float = 1.0
-    locator_width_weight: float = 0.5
     denoise_loss: str = "l2"
     use_gradient_clipping: bool = True
     max_grad_norm: float = 1.0
@@ -86,16 +71,6 @@ class MultiTaskConfig:
 
 
 def _build_model(config: MultiTaskConfig, max_tracks: int = 3) -> MultiTaskUNet:
-    # Ensure cuDNN/MIOpen is disabled before creating BatchNorm layers (only on ROCm)
-    if is_rocm() and hasattr(torch.backends, "cudnn"):
-        if torch.backends.cudnn.enabled:  # Only warn if it was previously enabled
-            torch.backends.cudnn.enabled = False
-            import warnings
-            warnings.warn(
-                "cuDNN disabled (ROCm detected). Using PyTorch native BatchNorm to avoid MIOpen compilation issues.",
-                UserWarning,
-                stacklevel=2
-            )
     return MultiTaskUNet(
         base_channels=48,
         use_bn=True,
@@ -178,8 +153,6 @@ def train_multitask_model(config: MultiTaskConfig, dataset: MultiTaskDataset) ->
         epoch_start = time.time()
         epoch_denoise = 0.0
         epoch_locator = 0.0
-        epoch_center = 0.0
-        epoch_width = 0.0
         epoch_total = 0.0
         batch_count = 0
 
@@ -191,19 +164,15 @@ def train_multitask_model(config: MultiTaskConfig, dataset: MultiTaskDataset) ->
         )
 
         for batch_idx, batch in pbar:
-            noisy, true_noise, target_pos, target_width, valid_mask = [
+            noisy, true_noise, target_heatmap = [
                 tensor.to(config.device) for tensor in batch
             ]
 
             optimizer.zero_grad()
-            pred_noise, pred_centers, pred_widths = model(noisy)
+            pred_noise, pred_heatmap = model(noisy)
             denoise_loss = denoise_criterion(pred_noise, true_noise)
-            center_loss = masked_l1_loss(pred_centers, target_pos, valid_mask)
-            width_loss = masked_l1_loss(pred_widths, target_width, valid_mask)
-            locator_loss = (
-                config.locator_center_weight * center_loss
-                + config.locator_width_weight * width_loss
-            )
+            # L2 loss for heatmap prediction
+            locator_loss = nn.functional.mse_loss(pred_heatmap, target_heatmap)
 
             adaptive_denoise_weight = config.denoise_loss_weight
             if config.auto_balance_losses:
@@ -225,8 +194,6 @@ def train_multitask_model(config: MultiTaskConfig, dataset: MultiTaskDataset) ->
             optimizer.step()
 
             epoch_denoise += denoise_loss.item()
-            epoch_center += center_loss.item()
-            epoch_width += width_loss.item()
             epoch_locator += locator_loss.item()
             epoch_total += total_loss.item()
             batch_count += 1
@@ -242,13 +209,10 @@ def train_multitask_model(config: MultiTaskConfig, dataset: MultiTaskDataset) ->
 
         avg_denoise = epoch_denoise / max(batch_count, 1)
         avg_locator = epoch_locator / max(batch_count, 1)
-        avg_center = epoch_center / max(batch_count, 1)
-        avg_width = epoch_width / max(batch_count, 1)
         avg_total = epoch_total / max(batch_count, 1)
         print(
             f"Epoch {epoch + 1}/{config.epochs} completed: Total={avg_total:.6f}, "
-            f"Denoise={avg_denoise:.6f}, Locator={avg_locator:.6f} "
-            f"(center={avg_center:.6f}, width={avg_width:.6f}), "
+            f"Denoise={avg_denoise:.6f}, Locator={avg_locator:.6f}, "
             f"Time={time.time() - epoch_start:.2f}s",
         )
 
@@ -301,17 +265,6 @@ def load_multitask_model(
     max_tracks: int = 3,
 ) -> MultiTaskUNet:
     """Load a trained multi-task model."""
-
-    # Ensure cuDNN/MIOpen is disabled before creating BatchNorm layers (only on ROCm)
-    if is_rocm() and hasattr(torch.backends, "cudnn"):
-        if torch.backends.cudnn.enabled:  # Only warn if it was previously enabled
-            torch.backends.cudnn.enabled = False
-            import warnings
-            warnings.warn(
-                "cuDNN disabled (ROCm detected). Using PyTorch native BatchNorm to avoid MIOpen compilation issues.",
-                UserWarning,
-                stacklevel=2
-            )
     
     device = device or get_default_device()
     model = MultiTaskUNet(max_tracks=max_tracks).to(device)
