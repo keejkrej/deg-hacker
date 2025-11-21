@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Union, Tuple
+
 import torch
 from torch import nn
 
@@ -343,7 +345,7 @@ class TemporalLocator(nn.Module):
         nn.init.xavier_uniform_(self.regressor[-1].weight, gain=0.1)
         nn.init.constant_(self.regressor[-1].bias, 0.0)
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor, return_heatmap: bool = False) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         # x: (batch, 1, time=16, space=512)
         features = self.features(x)  # (batch, channels=48, time=16, space=512)
         
@@ -372,11 +374,16 @@ class TemporalLocator(nn.Module):
         widths = torch.nn.functional.softplus(width_logits).max(dim=-1)[0] + 1e-3  # (batch, max_tracks, time)
         widths = widths / spatial_pixels  # Normalize
         
+        if return_heatmap:
+            # Sum center_logits across tracks to get combined heatmap
+            # Shape: (batch, max_tracks, time, space) -> (batch, time, space)
+            heatmap = center_logits.sum(dim=1)  # Sum across tracks
+            return centers, widths, heatmap
         return centers, widths
 
 
 class MultiTaskUNet(nn.Module):
-    """Wrapper that couples denoising U-Net with a heatmap-based locator."""
+    """Wrapper that couples denoising U-Net with a temporal locator."""
 
     def __init__(
         self,
@@ -386,7 +393,6 @@ class MultiTaskUNet(nn.Module):
         dropout: float = 0.0,
         encoder_dropout: float = 0.0,
         decoder_dropout: float = 0.0,
-        locator_base_channels: int = 32,
     ) -> None:
         super().__init__()
         self.max_tracks = max_tracks
@@ -397,30 +403,20 @@ class MultiTaskUNet(nn.Module):
             encoder_dropout=encoder_dropout,
             decoder_dropout=decoder_dropout,
         )
-        self.locator = HeatmapLocator(
+        self.locator = TemporalLocator(
             in_channels=1,
-            base_channels=locator_base_channels,
-            use_bn=use_bn,
-            dropout=dropout,
-            encoder_dropout=encoder_dropout,
-            decoder_dropout=decoder_dropout,
+            spatial_channels=base_channels,
+            max_tracks=max_tracks,
         )
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Forward pass.
-        
-        Args:
-            x: (batch, 1, time=16, space=512) input kymograph slice
-            
-        Returns:
-            predicted_noise: (batch, 1, time=16, space=512) predicted noise
-            heatmap: (batch, 1, time=16, space=512) predicted heatmap
-        """
+    def forward(self, x: torch.Tensor, return_heatmap: bool = False) -> Union[Tuple[torch.Tensor, torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
         predicted_noise = self.denoiser(x)
         denoised = torch.clamp(x - predicted_noise, 0.0, 1.0)
-        heatmap = self.locator(denoised.detach())
-        return predicted_noise, heatmap
+        if return_heatmap:
+            centers, widths, heatmap = self.locator(denoised.detach(), return_heatmap=True)
+            return predicted_noise, centers, widths, heatmap
+        centers, widths = self.locator(denoised.detach())
+        return predicted_noise, centers, widths
 
 
 __all__ = [

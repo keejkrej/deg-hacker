@@ -99,9 +99,8 @@ def run_deeplearning_pipeline(kymograph_noisy, model, device):
     
     # Reconstruct full outputs for visualization
     denoised_full = np.zeros((T, W), dtype=np.float32)
+    heatmap_full = np.zeros((T, W), dtype=np.float32)
     weights = np.zeros((T, W), dtype=np.float32)
-    mask_full = np.zeros((T, W), dtype=bool)
-    labeled_mask_full = np.zeros((T, W), dtype=int)
     
     window = np.ones(chunk_size)
     if overlap > 0:
@@ -120,9 +119,8 @@ def run_deeplearning_pipeline(kymograph_noisy, model, device):
         
         weight_chunk = window[:actual_len, np.newaxis]
         denoised_full[start:end] += result['denoised'] * weight_chunk
+        heatmap_full[start:end] += result['heatmap'] * weight_chunk
         weights[start:end] += weight_chunk
-        mask_full[start:end] = result['mask']
-        labeled_mask_full[start:end] = result['labeled_mask']
         
         if centers_full is None:
             n_tracks = result['centers'].shape[1] if result['centers'].ndim > 1 else 1
@@ -136,13 +134,13 @@ def run_deeplearning_pipeline(kymograph_noisy, model, device):
         start += chunk_size - overlap
     
     denoised_full = np.divide(denoised_full, weights, out=np.zeros_like(denoised_full), where=weights > 0)
+    heatmap_full = np.divide(heatmap_full, weights, out=np.zeros_like(heatmap_full), where=weights > 0)
     centers_full = np.divide(centers_full, temporal_weights, out=np.zeros_like(centers_full), where=temporal_weights > 0)
     widths_full = np.divide(widths_full, temporal_weights, out=np.zeros_like(widths_full), where=temporal_weights > 0)
     
     return {
         'denoised': denoised_full,
-        'mask': mask_full,
-        'labeled_mask': labeled_mask_full,
+        'heatmap': heatmap_full,
         'trajectories': linked_trajectories,
         'centers': centers_full,
         'widths': widths_full,
@@ -358,7 +356,7 @@ def main():
             classical_mask=classical_result['mask'],
             classical_trajectories=classical_result['trajectories'],
             deeplearning_denoised=dl_result['denoised'],
-            deeplearning_mask=dl_result['mask'],
+            deeplearning_heatmap=dl_result['heatmap'],
             deeplearning_trajectories=dl_result['trajectories'],
             true_paths=true_paths,
             output_path=str(output_path),

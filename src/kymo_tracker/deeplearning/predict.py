@@ -6,6 +6,20 @@ from typing import Optional, Tuple, List
 
 import numpy as np
 import torch
+import warnings
+from scipy.signal import find_peaks
+
+# Disable cuDNN backend (maps to MIOpen on ROCm) to force PyTorch native BatchNorm
+# This avoids MIOpen kernel compilation issues on certain GPU architectures
+# Only disable on ROCm (AMD GPUs), not on NVIDIA CUDA where cuDNN is beneficial
+if (hasattr(torch.version, "hip") or hasattr(torch.backends, "miopen")) and hasattr(torch.backends, "cudnn"):
+    torch.backends.cudnn.enabled = False
+    warnings.warn(
+        "cuDNN disabled (ROCm detected). Using PyTorch native BatchNorm to avoid MIOpen compilation issues. "
+        "Performance may be slower than optimized MIOpen kernels.",
+        UserWarning,
+        stacklevel=2
+    )
 
 from kymo_tracker.deeplearning.models.multitask import MultiTaskUNet
 
@@ -201,32 +215,125 @@ def extract_trajectories_from_mask(
     return trajectories
 
 
+def extract_trajectories_from_heatmap(
+    kymograph: np.ndarray,
+    heatmap: np.ndarray,
+    max_tracks: int = 3,
+    peak_prominence: Optional[float] = None,
+    peak_distance: Optional[float] = None,
+) -> list[np.ndarray]:
+    """
+    Extract trajectories using heatmap-weighted raw image and peak finding.
+    
+    The heatmap is squared for better contrast, then applied as weights to the raw
+    kymograph. For each timepoint, find_peaks is used to detect particle positions.
+    
+    Args:
+        kymograph: (T, W) raw kymograph
+        heatmap: (T, W) heatmap from model (will be squared and normalized)
+        max_tracks: Maximum number of tracks to extract per timepoint
+        peak_prominence: Minimum prominence for peak detection (None = auto)
+        peak_distance: Minimum distance between peaks (None = auto)
+        
+    Returns:
+        trajectories: List of (T,) arrays, one per track
+    """
+    T, W = kymograph.shape
+    
+    # Square the heatmap for better contrast
+    heatmap_squared = heatmap ** 2
+    
+    # Normalize heatmap to [0, 1] range for each timepoint
+    for t in range(T):
+        row_max = heatmap_squared[t].max()
+        if row_max > 0:
+            heatmap_squared[t] = heatmap_squared[t] / row_max
+    
+    # Apply heatmap as weights to raw image
+    weighted_kymograph = kymograph * heatmap_squared
+    
+    # Extract trajectories using peak finding for each timepoint
+    trajectories = [np.full(T, np.nan) for _ in range(max_tracks)]
+    
+    for t in range(T):
+        row = weighted_kymograph[t]
+        
+        # Auto-determine prominence if not provided (use percentile of row)
+        if peak_prominence is None:
+            prominence = np.percentile(row, 75) - np.percentile(row, 25)
+            prominence = max(prominence, row.max() * 0.1)  # At least 10% of max
+        else:
+            prominence = peak_prominence
+        
+        # Auto-determine distance if not provided (assume particles are well-separated)
+        if peak_distance is None:
+            distance = W / (max_tracks + 1)  # Rough estimate
+        else:
+            distance = peak_distance
+        
+        # Find peaks
+        peaks, properties = find_peaks(
+            row,
+            prominence=prominence,
+            distance=distance,
+        )
+        
+        # Sort peaks by height (descending) and take top max_tracks
+        if len(peaks) > 0:
+            peak_heights = row[peaks]
+            sorted_indices = np.argsort(peak_heights)[::-1]
+            top_peaks = peaks[sorted_indices[:max_tracks]]
+            
+            # Subpixel refinement for each peak
+            for track_idx, peak_idx in enumerate(top_peaks):
+                if 0 < peak_idx < W - 1:
+                    y0, y1, y2 = row[peak_idx-1], row[peak_idx], row[peak_idx+1]
+                    denom = (y0 - 2*y1 + y2)
+                    if denom != 0:
+                        delta = 0.5 * (y0 - y2) / denom
+                        trajectories[track_idx][t] = peak_idx + delta
+                    else:
+                        trajectories[track_idx][t] = peak_idx
+                else:
+                    trajectories[track_idx][t] = peak_idx
+    
+    # Remove trajectories that are all NaN
+    trajectories = [traj for traj in trajectories if not np.all(np.isnan(traj))]
+    
+    # Ensure at least one trajectory
+    if not trajectories:
+        trajectories.append(np.full(T, np.nan))
+    
+    return trajectories
+
+
 def process_slice_independently(
     model: MultiTaskUNet,
     kymograph_slice: np.ndarray,
     device: Optional[str] = None,
-    max_tracks: int = 3,
-    min_peak_value: float = 0.1,
-    nms_window: int = 5,
+    peak_prominence: Optional[float] = None,
+    peak_distance: Optional[float] = None,
 ) -> dict:
     """
     Process a single 16x512 slice independently and extract trajectories from heatmap.
+    
+    Uses heatmap-weighted peak finding: the model's heatmap is squared for contrast,
+    applied as weights to the raw image, then find_peaks is used for each timepoint.
     
     Args:
         model: Multi-task model
         kymograph_slice: (T, W) kymograph slice (typically 16x512)
         device: Device to run model on
-        max_tracks: Maximum number of tracks to extract
-        min_peak_value: Minimum peak value threshold for heatmap
-        nms_window: Window size for non-maximum suppression (in pixels)
+        peak_prominence: Minimum prominence for peak detection (None = auto)
+        peak_distance: Minimum distance between peaks (None = auto)
         
     Returns:
         Dictionary with:
         - 'denoised': (T, W) denoised slice
         - 'trajectories': List of (T,) trajectory arrays
-        - 'heatmap': (T, W) predicted heatmap
-        - 'mask': (T, W) boolean mask (derived from heatmap)
-        - 'labeled_mask': (T, W) labeled mask (derived from heatmap)
+        - 'centers': (T, N_tracks) center predictions
+        - 'widths': (T, N_tracks) width predictions
+        - 'heatmap': (T, W) heatmap from model
     """
     if device is None:
         device = next(model.parameters()).device.type
@@ -243,59 +350,51 @@ def process_slice_independently(
             padded_slice = kymograph_slice[:16]  # Take first 16 frames
         
         input_tensor = torch.from_numpy(padded_slice).unsqueeze(0).unsqueeze(0).float().to(device)
-        pred_noise, pred_heatmap = model(input_tensor)
+        pred_noise, pred_centers, pred_widths, pred_heatmap = model(input_tensor, return_heatmap=True)
         
         # Check for NaN outputs
         if torch.isnan(pred_noise).any() or torch.isnan(pred_heatmap).any():
-            import warnings
             warnings.warn(
                 "Model output contains NaN values. Model may not be properly trained. "
                 "Using input as fallback (no denoising applied).",
                 UserWarning
             )
             denoised_slice = kymograph_slice.copy()
+            max_tracks = pred_centers.shape[1] if pred_centers.ndim > 1 else 1
+            centers_px = np.full((T, max_tracks), W / 2, dtype=np.float32)
+            widths_px = np.full((T, max_tracks), W * 0.1, dtype=np.float32)
             heatmap_np = np.zeros((T, W), dtype=np.float32)
         else:
             denoised_chunk = torch.clamp(input_tensor - pred_noise, 0.0, 1.0).squeeze().cpu().numpy()
             denoised_slice = denoised_chunk[:T]  # Trim to actual length
             
-            heatmap_chunk = pred_heatmap.squeeze().cpu().numpy()
-            heatmap_np = heatmap_chunk[:T]  # Trim to actual length
+            centers_np = pred_centers.squeeze(0).cpu().numpy().transpose(1, 0)
+            widths_np = pred_widths.squeeze(0).cpu().numpy().transpose(1, 0)
+            centers_px = (centers_np * (W - 1))[:T]  # Trim to actual length
+            widths_px = (widths_np * W)[:T]  # Trim to actual length
+            
+            heatmap_np = pred_heatmap.squeeze(0).cpu().numpy()[:T]
         
-        del input_tensor, pred_noise, pred_heatmap
+        del input_tensor, pred_noise, pred_centers, pred_widths, pred_heatmap
         if str(device).startswith("cuda"):
             torch.cuda.empty_cache()
     
-    # Extract peaks from heatmap
-    trajectories = extract_peaks_from_heatmap(
+    # Extract trajectories using heatmap-weighted peak finding
+    max_tracks = centers_px.shape[1] if centers_px.ndim > 1 else model.max_tracks
+    trajectories = extract_trajectories_from_heatmap(
+        kymograph_slice,
         heatmap_np,
-        max_peaks=max_tracks,
-        min_peak_value=min_peak_value,
-        nms_window=nms_window,
+        max_tracks=max_tracks,
+        peak_prominence=peak_prominence,
+        peak_distance=peak_distance,
     )
-    
-    # Create masks from trajectories for visualization
-    mask = np.zeros((T, W), dtype=bool)
-    labeled_mask = np.zeros((T, W), dtype=int)
-    
-    for track_idx, traj in enumerate(trajectories):
-        for t in range(T):
-            if not np.isnan(traj[t]):
-                center_px = int(np.round(traj[t]))
-                center_px = np.clip(center_px, 0, W - 1)
-                # Create a small window around the peak
-                window_size = max(1, nms_window)
-                start_x = max(0, center_px - window_size)
-                end_x = min(W, center_px + window_size + 1)
-                mask[t, start_x:end_x] = True
-                labeled_mask[t, start_x:end_x] = track_idx + 1
     
     return {
         'denoised': denoised_slice,
         'trajectories': trajectories,
+        'centers': centers_px,
+        'widths': widths_px,
         'heatmap': heatmap_np,
-        'mask': mask,
-        'labeled_mask': labeled_mask,
     }
 
 
@@ -409,9 +508,7 @@ def link_trajectories_across_slices(
 
 
 __all__ = [
-    "extract_peaks_from_heatmap",
-    "create_mask_from_centers_widths",
-    "extract_trajectories_from_mask",
+    "extract_trajectories_from_heatmap",
     "process_slice_independently",
     "link_trajectories_across_slices",
 ]
