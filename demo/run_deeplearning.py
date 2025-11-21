@@ -54,12 +54,11 @@ def run_deeplearning_pipeline(kymograph_noisy, model, device):
         overlap=overlap,
     )
     
-    # Reconstruct full denoised kymograph and masks (for visualization)
+    # Reconstruct full denoised kymograph and heatmap (for visualization)
     # Blend denoised slices with overlap handling
     denoised_full = np.zeros((T, W), dtype=np.float32)
+    heatmap_full = np.zeros((T, W), dtype=np.float32)
     weights = np.zeros((T, W), dtype=np.float32)
-    mask_full = np.zeros((T, W), dtype=bool)
-    labeled_mask_full = np.zeros((T, W), dtype=int)
     
     window = np.ones(chunk_size)
     if overlap > 0:
@@ -74,15 +73,13 @@ def run_deeplearning_pipeline(kymograph_noisy, model, device):
         
         weight_chunk = window[:actual_len, np.newaxis]
         denoised_full[start:end] += result['denoised'] * weight_chunk
+        heatmap_full[start:end] += result['heatmap'] * weight_chunk
         weights[start:end] += weight_chunk
-        
-        # For masks, just take the last slice's mask in overlap regions
-        mask_full[start:end] = result['mask']
-        labeled_mask_full[start:end] = result['labeled_mask']
         
         start += chunk_size - overlap
     
     denoised_full = np.divide(denoised_full, weights, out=np.zeros_like(denoised_full), where=weights > 0)
+    heatmap_full = np.divide(heatmap_full, weights, out=np.zeros_like(heatmap_full), where=weights > 0)
     
     # Reconstruct centers/widths for compatibility (blended across slices)
     # This is mainly for visualization/debugging
@@ -112,8 +109,7 @@ def run_deeplearning_pipeline(kymograph_noisy, model, device):
     
     return {
         'denoised': denoised_full,
-        'mask': mask_full,
-        'labeled_mask': labeled_mask_full,
+        'heatmap': heatmap_full,
         'trajectories': linked_trajectories,
         'centers': centers_full,
         'widths': widths_full,
@@ -196,8 +192,7 @@ def main():
         case_output_dir.mkdir(parents=True, exist_ok=True)
         
         np.save(case_output_dir / "denoised.npy", result['denoised'])
-        np.save(case_output_dir / "mask.npy", result['mask'])
-        np.save(case_output_dir / "labeled_mask.npy", result['labeled_mask'])
+        np.save(case_output_dir / "heatmap.npy", result['heatmap'])
         np.save(case_output_dir / "trajectories.npy", np.array(result['trajectories'], dtype=object))
         np.save(case_output_dir / "centers.npy", result['centers'])
         np.save(case_output_dir / "widths.npy", result['widths'])

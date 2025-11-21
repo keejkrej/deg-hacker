@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Union, Tuple
+
 import torch
 import warnings
 
@@ -193,7 +195,7 @@ class TemporalLocator(nn.Module):
         nn.init.xavier_uniform_(self.regressor[-1].weight, gain=0.1)
         nn.init.constant_(self.regressor[-1].bias, 0.0)
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor, return_heatmap: bool = False) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         # x: (batch, 1, time=16, space=512)
         features = self.features(x)  # (batch, channels=48, time=16, space=512)
         
@@ -222,6 +224,11 @@ class TemporalLocator(nn.Module):
         widths = torch.nn.functional.softplus(width_logits).max(dim=-1)[0] + 1e-3  # (batch, max_tracks, time)
         widths = widths / spatial_pixels  # Normalize
         
+        if return_heatmap:
+            # Sum center_logits across tracks to get combined heatmap
+            # Shape: (batch, max_tracks, time, space) -> (batch, time, space)
+            heatmap = center_logits.sum(dim=1)  # Sum across tracks
+            return centers, widths, heatmap
         return centers, widths
 
 
@@ -252,9 +259,12 @@ class MultiTaskUNet(nn.Module):
             max_tracks=max_tracks,
         )
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor, return_heatmap: bool = False) -> Union[Tuple[torch.Tensor, torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
         predicted_noise = self.denoiser(x)
         denoised = torch.clamp(x - predicted_noise, 0.0, 1.0)
+        if return_heatmap:
+            centers, widths, heatmap = self.locator(denoised.detach(), return_heatmap=True)
+            return predicted_noise, centers, widths, heatmap
         centers, widths = self.locator(denoised.detach())
         return predicted_noise, centers, widths
 

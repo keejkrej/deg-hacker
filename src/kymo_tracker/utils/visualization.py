@@ -12,7 +12,7 @@ def visualize_comparison(
     classical_mask: np.ndarray,
     classical_trajectories: Sequence[np.ndarray],
     deeplearning_denoised: np.ndarray,
-    deeplearning_mask: np.ndarray,
+    deeplearning_heatmap: np.ndarray,
     deeplearning_trajectories: Sequence[np.ndarray],
     true_paths: Optional[Sequence[np.ndarray]] = None,
     output_path: str = "comparison.png",
@@ -27,7 +27,7 @@ def visualize_comparison(
         classical_mask: (T, W) segmentation mask from classical approach
         classical_trajectories: list of (T,) arrays, one per particle
         deeplearning_denoised: (T, W) denoised result
-        deeplearning_mask: (T, W) segmentation mask from deep learning
+        deeplearning_heatmap: (T, W) heatmap from deep learning model
         deeplearning_trajectories: list of (T,) arrays, one per particle
         true_paths: optional list of (T,) arrays with ground truth paths
         output_path: where to save the figure
@@ -109,10 +109,10 @@ def visualize_comparison(
     ax.set_xlabel('Time')
     ax.set_ylabel('Position')
     
-    # 3. Segmentation mask
+    # 3. Heatmap
     ax = axes[1, 2]
-    ax.imshow(deeplearning_mask.T, cmap='gray', aspect='auto', origin='lower')
-    ax.set_title('3. Segmentation Mask', fontweight='bold')
+    ax.imshow(deeplearning_heatmap.T, cmap='hot', aspect='auto', origin='lower')
+    ax.set_title('3. Heatmap', fontweight='bold')
     ax.set_xlabel('Time')
     ax.set_ylabel('Position')
     

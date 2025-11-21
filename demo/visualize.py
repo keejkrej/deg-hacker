@@ -92,7 +92,7 @@ def main():
         # Load deep learning results
         dl_case_dir = deeplearning_dir / f"case_{i:02d}"
         dl_denoised = np.load(dl_case_dir / "denoised.npy")
-        dl_mask = np.load(dl_case_dir / "mask.npy")
+        dl_heatmap = np.load(dl_case_dir / "heatmap.npy")
         dl_trajectories_obj = np.load(dl_case_dir / "trajectories.npy", allow_pickle=True)
         # Handle both list and array formats
         if isinstance(dl_trajectories_obj, np.ndarray) and dl_trajectories_obj.ndim == 2:
@@ -111,7 +111,7 @@ def main():
             classical_mask=classical_mask,
             classical_trajectories=classical_trajectories,
             deeplearning_denoised=dl_denoised,
-            deeplearning_mask=dl_mask,
+            deeplearning_heatmap=dl_heatmap,
             deeplearning_trajectories=dl_trajectories,
             true_paths=true_paths,
             output_path=str(output_path),
