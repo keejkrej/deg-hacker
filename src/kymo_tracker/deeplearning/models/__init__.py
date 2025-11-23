@@ -1,10 +1,10 @@
 """Model definitions for kymo-tracker."""
 
-from .multitask import ConvBlock, DenoiseUNet, TemporalLocator, MultiTaskUNet
+from .multitask import ConvBlock, DenoiseUNet, HeatmapPredictor, MultiTaskUNet
 
 __all__ = [
     "ConvBlock",
     "DenoiseUNet",
-    "TemporalLocator",
+    "HeatmapPredictor",
     "MultiTaskUNet",
 ]

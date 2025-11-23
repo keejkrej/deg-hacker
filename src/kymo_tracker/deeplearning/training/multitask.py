@@ -39,6 +39,57 @@ def masked_l1_loss(
     return masked_diff.sum() / denom
 
 
+def focal_loss(
+    pred_logits: torch.Tensor,
+    target: torch.Tensor,
+    gamma: float = 2.0,
+) -> torch.Tensor:
+    """
+    Focal loss for binary segmentation with automatic alpha balancing per image.
+    
+    Args:
+        pred_logits: (batch, 1, H, W) predicted logits (before sigmoid)
+        target: (batch, 1, H, W) binary target mask (0 or 1)
+        gamma: Focusing parameter (default 2.0)
+    
+    Returns:
+        Scalar focal loss
+    """
+    # Apply sigmoid to get probabilities
+    pred_probs = torch.sigmoid(pred_logits)
+    
+    # Compute BCE
+    bce = nn.functional.binary_cross_entropy_with_logits(
+        pred_logits, target, reduction='none'
+    )
+    
+    # Compute p_t (probability of true class)
+    p_t = pred_probs * target + (1 - pred_probs) * (1 - target)
+    
+    # Compute focal weight: (1 - p_t)^gamma
+    focal_weight = (1 - p_t) ** gamma
+    
+    # Compute alpha per image based on positive/negative ratio
+    # target shape: (batch, 1, H, W)
+    # Sum over spatial dimensions to get n_pos per image: (batch, 1, 1, 1)
+    n_pos_per_image = target.sum(dim=(2, 3), keepdim=True).float()  # (batch, 1, 1, 1)
+    n_total_per_image = target.numel() // target.shape[0]  # Total pixels per image
+    n_neg_per_image = n_total_per_image - n_pos_per_image
+    
+    # Compute alpha for positive class per image: n_pos / (n_pos + n_neg)
+    # Shape: (batch, 1, 1, 1)
+    alpha_pos_per_image = n_pos_per_image / (n_pos_per_image + n_neg_per_image + 1e-8)
+    
+    # Apply per-image alpha: alpha_pos for positive pixels, (1 - alpha_pos) for negative pixels
+    # Broadcast to match target shape: (batch, 1, H, W)
+    alpha_t = alpha_pos_per_image * target + (1 - alpha_pos_per_image) * (1 - target)
+    
+    # Combine: alpha_t * (1 - p_t)^gamma * BCE
+    focal_loss = alpha_t * focal_weight * bce
+    
+    return focal_loss.mean()
+
+
 @dataclass
 class MultiTaskConfig:
     """Configuration for multi-task model training."""
@@ -47,8 +98,9 @@ class MultiTaskConfig:
     batch_size: int = 8
     learning_rate: float = 1e-3
     denoise_loss_weight: float = 1.0
-    locator_loss_weight: float = 2.0
+    heatmap_loss_weight: float = 2.0
     denoise_loss: str = "l2"
+    mode: str = "heatmap"
     use_gradient_clipping: bool = True
     max_grad_norm: float = 1.0
     weight_decay: float = 1e-4
@@ -78,6 +130,7 @@ def _build_model(config: MultiTaskConfig, max_tracks: int = 3) -> MultiTaskUNet:
         dropout=config.dropout,
         encoder_dropout=config.encoder_dropout,
         decoder_dropout=config.decoder_dropout,
+        mode=config.mode,
     ).to(config.device)
 
 
@@ -99,7 +152,13 @@ def _resolve_checkpoint_path(config: MultiTaskConfig) -> Optional[str]:
 
 
 def train_multitask_model(config: MultiTaskConfig, dataset: MultiTaskDataset) -> MultiTaskUNet:
-    """Train the multi-task denoising + locator model."""
+    """Train the multi-task denoising + heatmap/binary segmentation prediction model."""
+    
+    # Validate that dataset and config modes match
+    if dataset.mode != config.mode:
+        raise ValueError(
+            f"Dataset mode ({dataset.mode}) does not match config mode ({config.mode})"
+        )
 
     model = _build_model(config, max_tracks=dataset.max_trajectories)
     dataloader = DataLoader(dataset, batch_size=config.batch_size, shuffle=True, num_workers=0)
@@ -152,7 +211,7 @@ def train_multitask_model(config: MultiTaskConfig, dataset: MultiTaskDataset) ->
         model.train()
         epoch_start = time.time()
         epoch_denoise = 0.0
-        epoch_locator = 0.0
+        epoch_seg = 0.0
         epoch_total = 0.0
         batch_count = 0
 
@@ -164,22 +223,35 @@ def train_multitask_model(config: MultiTaskConfig, dataset: MultiTaskDataset) ->
         )
 
         for batch_idx, batch in pbar:
-            noisy, true_noise, target_heatmap = [
+            noisy, true_noise, target = [
                 tensor.to(config.device) for tensor in batch
             ]
 
             optimizer.zero_grad()
-            pred_noise, pred_centers, pred_widths, pred_heatmap = model(noisy, return_heatmap=True)
+            pred_noise, pred_seg = model(noisy)
             denoise_loss = denoise_criterion(pred_noise, true_noise)
-            # L2 loss for heatmap prediction
-            # pred_heatmap is (batch, time, space), need to add channel dim to match target_heatmap (batch, 1, time, space)
-            pred_heatmap = pred_heatmap.unsqueeze(1)  # (batch, 1, time, space)
-            locator_loss = nn.functional.mse_loss(pred_heatmap, target_heatmap)
+            
+            if config.mode == "segmentation":
+                # Binary segmentation with focal loss
+                # pred_seg is (batch, time, space) logits
+                # target is (batch, 1, time, space) binary mask
+                # Add channel dim to pred_seg for focal loss: (batch, 1, time, space)
+                pred_seg_logits = pred_seg.unsqueeze(1)  # (batch, 1, time, space)
+                seg_loss = focal_loss(
+                    pred_seg_logits,
+                    target,
+                    gamma=2.0,  # Standard focal loss gamma
+                )
+            else:  # config.mode == "heatmap"
+                # Heatmap prediction with MSE loss
+                # pred_seg is (batch, time, space), need to add channel dim
+                pred_heatmap = pred_seg.unsqueeze(1)  # (batch, 1, time, space)
+                seg_loss = nn.functional.mse_loss(pred_heatmap, target)
 
             adaptive_denoise_weight = config.denoise_loss_weight
             if config.auto_balance_losses:
                 with torch.no_grad():
-                    ratio = (locator_loss.detach() + 1e-6) / (denoise_loss.detach() + 1e-6)
+                    ratio = (seg_loss.detach() + 1e-6) / (denoise_loss.detach() + 1e-6)
                     ratio = torch.clamp(
                         ratio,
                         min=config.balance_min_scale,
@@ -187,7 +259,7 @@ def train_multitask_model(config: MultiTaskConfig, dataset: MultiTaskDataset) ->
                     )
                     adaptive_denoise_weight *= ratio.item()
 
-            total_loss = adaptive_denoise_weight * denoise_loss + config.locator_loss_weight * locator_loss
+            total_loss = adaptive_denoise_weight * denoise_loss + config.heatmap_loss_weight * seg_loss
             total_loss.backward()
 
             if config.use_gradient_clipping:
@@ -196,13 +268,13 @@ def train_multitask_model(config: MultiTaskConfig, dataset: MultiTaskDataset) ->
             optimizer.step()
 
             epoch_denoise += denoise_loss.item()
-            epoch_locator += locator_loss.item()
+            epoch_seg += seg_loss.item()
             epoch_total += total_loss.item()
             batch_count += 1
 
             pbar.set_postfix(
                 denoise=f"{denoise_loss.item():.4f}",
-                locator=f"{locator_loss.item():.4f}",
+                **{config.mode: f"{seg_loss.item():.4f}"},
                 lr=f"{optimizer.param_groups[0]['lr']:.2e}",
                 total=f"{total_loss.item():.4f}",
             )
@@ -210,11 +282,12 @@ def train_multitask_model(config: MultiTaskConfig, dataset: MultiTaskDataset) ->
         pbar.close()
 
         avg_denoise = epoch_denoise / max(batch_count, 1)
-        avg_locator = epoch_locator / max(batch_count, 1)
+        avg_seg = epoch_seg / max(batch_count, 1)
         avg_total = epoch_total / max(batch_count, 1)
+        mode_name = config.mode.capitalize()
         print(
             f"Epoch {epoch + 1}/{config.epochs} completed: Total={avg_total:.6f}, "
-            f"Denoise={avg_denoise:.6f}, Locator={avg_locator:.6f}, "
+            f"Denoise={avg_denoise:.6f}, {mode_name}={avg_seg:.6f}, "
             f"Time={time.time() - epoch_start:.2f}s",
         )
 
@@ -265,11 +338,15 @@ def load_multitask_model(
     path: str,
     device: Optional[str] = None,
     max_tracks: int = 3,
+    mode: str = "heatmap",
 ) -> MultiTaskUNet:
     """Load a trained multi-task model."""
     
     device = device or get_default_device()
-    model = MultiTaskUNet(max_tracks=max_tracks).to(device)
+    model = MultiTaskUNet(
+        max_tracks=max_tracks,
+        mode=mode,
+    ).to(device)
 
     checkpoint = torch.load(path, map_location=device, weights_only=False)
     if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:

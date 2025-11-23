@@ -3,7 +3,7 @@ Visualize Training Set Examples
 
 Processes and visualizes examples from the training dataset to:
 1. Show model performance on training data
-2. Visualize denoising and locator trajectory outputs
+2. Visualize denoising and heatmap prediction trajectory outputs
 3. Compare ground truth vs predictions
 4. Display per-particle center/width overlays for different tracks
 """

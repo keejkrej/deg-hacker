@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Union, Tuple
+from typing import Tuple
 
 import torch
 from torch import nn
@@ -268,8 +268,8 @@ class UNet1D(nn.Module):
         return self.head(d1)
 
 
-class HeatmapLocator(nn.Module):
-    """2D heatmap-based locator: treats keypoint detection as heatmap regression on full 16x512 slice."""
+class HeatmapPredictor2D(nn.Module):
+    """2D heatmap predictor: treats keypoint detection as heatmap regression on full 16x512 slice."""
 
     def __init__(
         self,
@@ -312,8 +312,8 @@ class HeatmapLocator(nn.Module):
         return heatmap
 
 
-class TemporalLocator(nn.Module):
-    """Simple CNN locator: extract features, regress centers/widths directly using 1D conv."""
+class HeatmapPredictor(nn.Module):
+    """Heatmap predictor: extract features and predict heatmap using 1D conv."""
 
     def __init__(
         self,
@@ -334,18 +334,18 @@ class TemporalLocator(nn.Module):
             nn.ReLU(inplace=True),
         )
         
-        # Process each time frame: use 1D conv along spatial dimension to regress directly
+        # Process each time frame: use 1D conv along spatial dimension to predict heatmap
         self.regressor = nn.Sequential(
             nn.Conv1d(spatial_channels, spatial_channels, kernel_size=5, padding=2),
             nn.BatchNorm1d(spatial_channels),
             nn.ReLU(inplace=True),
-            nn.Conv1d(spatial_channels, max_tracks * 2, kernel_size=1),
+            nn.Conv1d(spatial_channels, max_tracks, kernel_size=1),
         )
         
         nn.init.xavier_uniform_(self.regressor[-1].weight, gain=0.1)
         nn.init.constant_(self.regressor[-1].bias, 0.0)
 
-    def forward(self, x: torch.Tensor, return_heatmap: bool = False) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: (batch, 1, time=16, space=512)
         features = self.features(x)  # (batch, channels=48, time=16, space=512)
         
@@ -355,35 +355,52 @@ class TemporalLocator(nn.Module):
         features_reshaped = features.permute(0, 2, 1, 3).contiguous()  # (batch, time, channels, space)
         features_reshaped = features_reshaped.view(batch_size * time_frames, channels, spatial_pixels)
         
-        # Regress: (batch*time, channels, space) -> (batch*time, max_tracks*2, space)
-        preds = self.regressor(features_reshaped)  # (batch*time, max_tracks*2=6, space=512)
+        # Regress: (batch*time, channels, space) -> (batch*time, max_tracks, space)
+        preds = self.regressor(features_reshaped)  # (batch*time, max_tracks=3, space=512)
         
-        # Reshape back: (batch*time, max_tracks*2, space) -> (batch, time, max_tracks*2, space)
-        preds = preds.view(batch_size, time_frames, self.max_tracks * 2, spatial_pixels)
-        preds = preds.permute(0, 2, 1, 3)  # (batch, max_tracks*2, time, space)
+        # Reshape back: (batch*time, max_tracks, space) -> (batch, time, max_tracks, space)
+        preds = preds.view(batch_size, time_frames, self.max_tracks, spatial_pixels)
+        preds = preds.permute(0, 2, 1, 3)  # (batch, max_tracks, time, space)
         
-        # Split predictions
-        center_logits = preds[:, :self.max_tracks, :, :]  # (batch, max_tracks=3, time=16, space=512)
-        width_logits = preds[:, self.max_tracks:, :, :]   # (batch, max_tracks=3, time=16, space=512)
-        
-        # Centers: argmax over spatial dimension
-        centers = torch.argmax(center_logits, dim=-1).float()  # (batch, max_tracks, time)
-        centers = centers / (spatial_pixels - 1)  # Normalize to [0, 1]
-        
-        # Widths: max over spatial dimension
-        widths = torch.nn.functional.softplus(width_logits).max(dim=-1)[0] + 1e-3  # (batch, max_tracks, time)
-        widths = widths / spatial_pixels  # Normalize
-        
-        if return_heatmap:
-            # Sum center_logits across tracks to get combined heatmap
-            # Shape: (batch, max_tracks, time, space) -> (batch, time, space)
-            heatmap = center_logits.sum(dim=1)  # Sum across tracks
-            return centers, widths, heatmap
-        return centers, widths
+        # Sum across tracks to get combined heatmap
+        # Shape: (batch, max_tracks, time, space) -> (batch, time, space)
+        heatmap = preds.sum(dim=1)  # Sum across tracks
+        return heatmap
+
+
+class BinarySegmentationPredictor(nn.Module):
+    """Binary segmentation predictor: U-Net for continuous mask prediction (0-1)."""
+
+    def __init__(
+        self,
+        in_channels: int = 1,
+        base_channels: int = 48,
+        use_bn: bool = True,
+        dropout: float = 0.0,
+        encoder_dropout: float = 0.0,
+        decoder_dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        # Use the same U-Net architecture as DenoiseUNet but output continuous mask
+        self.unet = DenoiseUNet(
+            base_channels=base_channels,
+            use_bn=use_bn,
+            dropout=dropout,
+            encoder_dropout=encoder_dropout,
+            decoder_dropout=decoder_dropout,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (batch, 1, time=16, space=512)
+        # Output: (batch, time, space) continuous mask logits (before sigmoid for training)
+        # Shape matches heatmap output for consistency
+        mask_logits = self.unet(x)  # (batch, 1, time, space)
+        mask_logits = mask_logits.squeeze(1)  # (batch, time, space)
+        return mask_logits
 
 
 class MultiTaskUNet(nn.Module):
-    """Wrapper that couples denoising U-Net with a temporal locator."""
+    """Wrapper that couples denoising U-Net with a heatmap or binary segmentation predictor."""
 
     def __init__(
         self,
@@ -393,9 +410,13 @@ class MultiTaskUNet(nn.Module):
         dropout: float = 0.0,
         encoder_dropout: float = 0.0,
         decoder_dropout: float = 0.0,
+        mode: str = "heatmap",
     ) -> None:
         super().__init__()
         self.max_tracks = max_tracks
+        if mode not in ["heatmap", "segmentation"]:
+            raise ValueError(f"mode must be 'heatmap' or 'segmentation', got '{mode}'")
+        self.mode = mode
         self.denoiser = DenoiseUNet(
             base_channels=base_channels,
             use_bn=use_bn,
@@ -403,20 +424,31 @@ class MultiTaskUNet(nn.Module):
             encoder_dropout=encoder_dropout,
             decoder_dropout=decoder_dropout,
         )
-        self.locator = TemporalLocator(
-            in_channels=1,
-            spatial_channels=base_channels,
-            max_tracks=max_tracks,
-        )
+        if mode == "segmentation":
+            self.segmentation_predictor = BinarySegmentationPredictor(
+                in_channels=1,
+                base_channels=base_channels,
+                use_bn=use_bn,
+                dropout=dropout,
+                encoder_dropout=encoder_dropout,
+                decoder_dropout=decoder_dropout,
+            )
+        else:  # mode == "heatmap"
+            self.heatmap_predictor = HeatmapPredictor(
+                in_channels=1,
+                spatial_channels=base_channels,
+                max_tracks=max_tracks,
+            )
 
-    def forward(self, x: torch.Tensor, return_heatmap: bool = False) -> Union[Tuple[torch.Tensor, torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         predicted_noise = self.denoiser(x)
         denoised = torch.clamp(x - predicted_noise, 0.0, 1.0)
-        if return_heatmap:
-            centers, widths, heatmap = self.locator(denoised.detach(), return_heatmap=True)
-            return predicted_noise, centers, widths, heatmap
-        centers, widths = self.locator(denoised.detach())
-        return predicted_noise, centers, widths
+        if self.mode == "segmentation":
+            mask_logits = self.segmentation_predictor(denoised.detach())
+            return predicted_noise, mask_logits
+        else:  # mode == "heatmap"
+            heatmap = self.heatmap_predictor(denoised.detach())
+            return predicted_noise, heatmap
 
 
 __all__ = [
@@ -424,7 +456,8 @@ __all__ = [
     "Conv1DBlock",
     "DenoiseUNet",
     "UNet1D",
-    "TemporalLocator",
-    "HeatmapLocator",
+    "HeatmapPredictor",
+    "HeatmapPredictor2D",
+    "BinarySegmentationPredictor",
     "MultiTaskUNet",
 ]

@@ -29,7 +29,7 @@ config = MultiTaskConfig(
     epochs=12,
     batch_size=16,
     learning_rate=1e-3,
-    locator_loss_weight=2.0,
+    heatmap_loss_weight=2.0,
     checkpoint_dir="checkpoints",
 )
 model = train_multitask_model(config, dataset)
@@ -52,6 +52,6 @@ The trainer automatically searches `checkpoint_dir` for the latest `checkpoint_e
 
 ## Configuration Notes
 
-- `locator_center_weight` / `locator_width_weight` balance the two regression terms inside the locator loss.
-- Set `auto_balance_losses=False` if you prefer manual weighting between denoising and locator losses.
+- `heatmap_loss_weight` controls the weight of the heatmap prediction loss relative to the denoising loss.
+- Set `auto_balance_losses=False` if you prefer manual weighting between denoising and heatmap losses.
 - Checkpoints are no longer stored under `models/`; default to `checkpoints/` to keep artifacts separate from code.

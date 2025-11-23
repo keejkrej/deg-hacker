@@ -11,12 +11,12 @@ from kymo_tracker.utils.helpers import generate_kymograph, get_diffusion_coeffic
 
 
 class MultiTaskDataset(Dataset):
-    """Dataset for training multi-task denoising + heatmap locator model.
+    """Dataset for training multi-task denoising + heatmap/binary segmentation prediction model.
     
     Generates synthetic kymograph windows with multiple particles and returns:
     - noisy: noisy input kymograph (1, height, width)
     - true_noise: the noise that was added (1, height, width)
-    - target_heatmap: target heatmap with Gaussians at peak locations (1, height, width)
+    - target: target heatmap (Gaussians) or binary mask, depending on use_binary_segmentation (1, height, width)
     """
 
     def __init__(
@@ -32,6 +32,7 @@ class MultiTaskDataset(Dataset):
         max_trajectories: int = 3,
         mask_peak_width_samples: float = 10.0,
         particle_peak_width_samples: Optional[float] = None,
+        mode: str = "heatmap",
         seed: Optional[int] = None,
     ):
         """Initialize the dataset.
@@ -46,7 +47,8 @@ class MultiTaskDataset(Dataset):
             noise_level: Noise level range (single value or tuple)
             multi_trajectory_prob: Probability of generating multiple trajectories
             max_trajectories: Maximum number of trajectories per sample
-            mask_peak_width_samples: Target width for locator training (in pixels)
+            mask_peak_width_samples: Target width for heatmap/binary mask training (in pixels)
+            mode: "heatmap" or "segmentation" - determines target type
             particle_peak_width_samples: Actual particle width for generation (in pixels).
                 If None, uses a fixed value (2.0) to keep denoiser training consistent.
             seed: Random seed for reproducibility
@@ -56,7 +58,10 @@ class MultiTaskDataset(Dataset):
         self.window_length = window_length
         self.max_trajectories = max_trajectories
         self.mask_peak_width_samples = mask_peak_width_samples
-        # Use fixed particle width for denoiser training, separate from locator target
+        if mode not in ["heatmap", "segmentation"]:
+            raise ValueError(f"mode must be 'heatmap' or 'segmentation', got '{mode}'")
+        self.mode = mode
+        # Use fixed particle width for denoiser training, separate from heatmap target
         self.particle_peak_width_samples = particle_peak_width_samples if particle_peak_width_samples is not None else 2.0
         # Gaussian sigma for heatmap generation (in pixels)
         # Use mask_peak_width_samples as a proxy for Gaussian width
@@ -116,11 +121,41 @@ class MultiTaskDataset(Dataset):
         
         return heatmap
 
+    def _create_binary_mask(self, paths: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
+        """Create a binary mask from particle trajectories.
+        
+        Args:
+            paths: (n_trajectories, window_length) array of peak positions in pixels
+            shape: (window_length, width) shape of the output mask
+            
+        Returns:
+            mask: (window_length, width) binary mask (0 or 1)
+        """
+        window_length, width = shape
+        mask = np.zeros((window_length, width), dtype=np.float32)
+        
+        # Create spatial coordinate array
+        x = np.arange(width, dtype=np.float32)
+        
+        for t in range(window_length):
+            for traj_idx in range(paths.shape[0]):
+                center_px = paths[traj_idx, t]
+                if np.isnan(center_px) or center_px < 0 or center_px >= width:
+                    continue
+                
+                # Create binary mask: pixels within mask_peak_width_samples/2 of center
+                half_width = self.mask_peak_width_samples / 2.0
+                start_x = max(0, int(np.floor(center_px - half_width)))
+                end_x = min(width, int(np.ceil(center_px + half_width)) + 1)
+                mask[t, start_x:end_x] = 1.0
+        
+        return mask
+
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, ...]:
         """Generate a single training sample.
         
         Returns:
-            Tuple of (noisy, true_noise, target_heatmap)
+            Tuple of (noisy, true_noise, target) where target is either heatmap or binary mask
         """
         # Determine number of trajectories
         if np.random.rand() < self.multi_trajectory_prob:
@@ -143,7 +178,7 @@ class MultiTaskDataset(Dataset):
         diffusions = [get_diffusion_coefficient(r) for r in radii]
         
         # Generate kymograph directly at window size (16 time frames, 512 spatial pixels)
-        # Use fixed particle width for denoiser training (separate from locator target width)
+        # Use fixed particle width for denoiser training (separate from heatmap target width)
         noisy_window, gt_window, paths_window = generate_kymograph(
             length=self.window_length,  # Generate 16 time frames directly
             width=self.width,  # 512 spatial pixels
@@ -161,16 +196,20 @@ class MultiTaskDataset(Dataset):
         # Compute true noise
         true_noise_window = noisy_window - gt_window
         
-        # Create heatmap target with Gaussians at peak locations
-        target_heatmap = self._create_heatmap(paths_window, (self.window_length, self.width))
+        # Create target (heatmap or binary mask)
+        if self.mode == "segmentation":
+            target_mask = self._create_binary_mask(paths_window, (self.window_length, self.width))
+            target_tensor = torch.from_numpy(target_mask).float().unsqueeze(0)  # (1, window_length, width)
+        else:  # self.mode == "heatmap"
+            target_heatmap = self._create_heatmap(paths_window, (self.window_length, self.width))
+            target_tensor = torch.from_numpy(target_heatmap).float().unsqueeze(0)  # (1, window_length, width)
         
         # Convert to tensors and add channel dimension
         noisy_tensor = torch.from_numpy(noisy_window).float().unsqueeze(0)  # (1, window_length, width)
         true_noise_tensor = torch.from_numpy(true_noise_window).float().unsqueeze(0)  # (1, window_length, width)
-        target_heatmap_tensor = torch.from_numpy(target_heatmap).float().unsqueeze(0)  # (1, window_length, width)
         
         return (
             noisy_tensor,
             true_noise_tensor,
-            target_heatmap_tensor,
+            target_tensor,
         )

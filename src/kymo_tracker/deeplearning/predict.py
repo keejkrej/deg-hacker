@@ -303,9 +303,9 @@ def process_slice_independently(
     peak_distance: Optional[float] = None,
 ) -> dict:
     """
-    Process a single 16x512 slice independently and extract trajectories from heatmap.
+    Process a single 16x512 slice independently and extract trajectories from heatmap/segmentation.
     
-    Uses heatmap-weighted peak finding: the model's heatmap is squared for contrast,
+    Uses heatmap/segmentation-weighted peak finding: the model's output is squared for contrast,
     applied as weights to the raw image, then find_peaks is used for each timepoint.
     
     Args:
@@ -319,9 +319,7 @@ def process_slice_independently(
         Dictionary with:
         - 'denoised': (T, W) denoised slice
         - 'trajectories': List of (T,) trajectory arrays
-        - 'centers': (T, N_tracks) center predictions
-        - 'widths': (T, N_tracks) width predictions
-        - 'heatmap': (T, W) heatmap from model
+        - 'heatmap': (T, W) heatmap/segmentation map from model (continuous 0-1)
     """
     if device is None:
         device = next(model.parameters()).device.type
@@ -338,41 +336,37 @@ def process_slice_independently(
             padded_slice = kymograph_slice[:16]  # Take first 16 frames
         
         input_tensor = torch.from_numpy(padded_slice).unsqueeze(0).unsqueeze(0).float().to(device)
-        pred_noise, pred_centers, pred_widths, pred_heatmap = model(input_tensor, return_heatmap=True)
+        pred_noise, pred_map = model(input_tensor)
         
         # Check for NaN outputs
-        if torch.isnan(pred_noise).any() or torch.isnan(pred_heatmap).any():
+        if torch.isnan(pred_noise).any() or torch.isnan(pred_map).any():
             warnings.warn(
                 "Model output contains NaN values. Model may not be properly trained. "
                 "Using input as fallback (no denoising applied).",
                 UserWarning
             )
             denoised_slice = kymograph_slice.copy()
-            max_tracks = pred_centers.shape[1] if pred_centers.ndim > 1 else 1
-            centers_px = np.full((T, max_tracks), W / 2, dtype=np.float32)
-            widths_px = np.full((T, max_tracks), W * 0.1, dtype=np.float32)
-            heatmap_np = np.zeros((T, W), dtype=np.float32)
+            map_np = np.zeros((T, W), dtype=np.float32)
         else:
             denoised_chunk = torch.clamp(input_tensor - pred_noise, 0.0, 1.0).squeeze().cpu().numpy()
             denoised_slice = denoised_chunk[:T]  # Trim to actual length
             
-            centers_np = pred_centers.squeeze(0).cpu().numpy().transpose(1, 0)
-            widths_np = pred_widths.squeeze(0).cpu().numpy().transpose(1, 0)
-            centers_px = (centers_np * (W - 1))[:T]  # Trim to actual length
-            widths_px = (widths_np * W)[:T]  # Trim to actual length
+            # Convert to probabilities (0-1) if segmentation mode (logits)
+            if model.mode == "segmentation":
+                # Apply sigmoid to convert logits to probabilities
+                pred_map = torch.sigmoid(pred_map)
             
-            heatmap_np = pred_heatmap.squeeze(0).cpu().numpy()[:T]
+            map_np = pred_map.squeeze(0).cpu().numpy()[:T]  # (T, W)
         
-        del input_tensor, pred_noise, pred_centers, pred_widths, pred_heatmap
+        del input_tensor, pred_noise, pred_map
         if str(device).startswith("cuda"):
             torch.cuda.empty_cache()
     
-    # Extract trajectories using heatmap-weighted peak finding
-    max_tracks = centers_px.shape[1] if centers_px.ndim > 1 else model.max_tracks
+    # Extract trajectories using map-weighted peak finding (works for both heatmap and segmentation)
     trajectories = extract_trajectories_from_heatmap(
         kymograph_slice,
-        heatmap_np,
-        max_tracks=max_tracks,
+        map_np,
+        max_tracks=model.max_tracks,
         peak_prominence=peak_prominence,
         peak_distance=peak_distance,
     )
@@ -380,9 +374,7 @@ def process_slice_independently(
     return {
         'denoised': denoised_slice,
         'trajectories': trajectories,
-        'centers': centers_px,
-        'widths': widths_px,
-        'heatmap': heatmap_np,
+        'heatmap': map_np,  # Keep name 'heatmap' for backward compatibility
     }
 
 
