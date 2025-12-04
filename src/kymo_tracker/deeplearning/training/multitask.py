@@ -39,55 +39,86 @@ def masked_l1_loss(
     return masked_diff.sum() / denom
 
 
-def focal_loss(
-    pred_logits: torch.Tensor,
+def dice_loss(
+    pred: torch.Tensor,
     target: torch.Tensor,
-    gamma: float = 2.0,
+    smooth: float = 1e-6,
 ) -> torch.Tensor:
     """
-    Focal loss for binary segmentation with automatic alpha balancing per image.
+    Dice loss for binary segmentation.
+    
+    Dice coefficient measures overlap: D = 2|X ∩ Y| / (|X| + |Y|)
+    Dice loss = 1 - D (minimized when overlap is maximized)
     
     Args:
-        pred_logits: (batch, 1, H, W) predicted logits (before sigmoid)
+        pred: (batch, 1, H, W) predicted probabilities (0-1) or logits
         target: (batch, 1, H, W) binary target mask (0 or 1)
-        gamma: Focusing parameter (default 2.0)
+        smooth: Smoothing factor to avoid division by zero
     
     Returns:
-        Scalar focal loss
+        Scalar dice loss (1 - dice_coefficient)
     """
-    # Apply sigmoid to get probabilities
-    pred_probs = torch.sigmoid(pred_logits)
+    # If pred contains logits, apply sigmoid
+    if pred.min() < 0 or pred.max() > 1:
+        pred = torch.sigmoid(pred)
     
-    # Compute BCE
-    bce = nn.functional.binary_cross_entropy_with_logits(
-        pred_logits, target, reduction='none'
-    )
+    # Flatten tensors: (batch, 1, H, W) -> (batch, H*W)
+    pred_flat = pred.view(pred.size(0), -1)
+    target_flat = target.view(target.size(0), -1)
     
-    # Compute p_t (probability of true class)
-    p_t = pred_probs * target + (1 - pred_probs) * (1 - target)
+    # Compute intersection and union
+    intersection = (pred_flat * target_flat).sum(dim=1)  # (batch,)
+    pred_sum = pred_flat.sum(dim=1)  # (batch,)
+    target_sum = target_flat.sum(dim=1)  # (batch,)
     
-    # Compute focal weight: (1 - p_t)^gamma
-    focal_weight = (1 - p_t) ** gamma
+    # Dice coefficient: 2 * intersection / (pred_sum + target_sum)
+    dice = (2.0 * intersection + smooth) / (pred_sum + target_sum + smooth)
     
-    # Compute alpha per image based on positive/negative ratio
-    # target shape: (batch, 1, H, W)
-    # Sum over spatial dimensions to get n_pos per image: (batch, 1, 1, 1)
-    n_pos_per_image = target.sum(dim=(2, 3), keepdim=True).float()  # (batch, 1, 1, 1)
-    n_total_per_image = target.numel() // target.shape[0]  # Total pixels per image
-    n_neg_per_image = n_total_per_image - n_pos_per_image
+    # Dice loss: 1 - dice_coefficient
+    dice_loss_value = 1.0 - dice
     
-    # Compute alpha for positive class per image: n_pos / (n_pos + n_neg)
-    # Shape: (batch, 1, 1, 1)
-    alpha_pos_per_image = n_pos_per_image / (n_pos_per_image + n_neg_per_image + 1e-8)
+    return dice_loss_value.mean()
+
+
+def soft_dice_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    smooth: float = 1e-6,
+) -> torch.Tensor:
+    """
+    Soft Dice loss for continuous heatmap predictions.
     
-    # Apply per-image alpha: alpha_pos for positive pixels, (1 - alpha_pos) for negative pixels
-    # Broadcast to match target shape: (batch, 1, H, W)
-    alpha_t = alpha_pos_per_image * target + (1 - alpha_pos_per_image) * (1 - target)
+    Works with continuous values (0-1) instead of binary masks.
+    Useful for heatmap regression where targets are Gaussian distributions.
     
-    # Combine: alpha_t * (1 - p_t)^gamma * BCE
-    focal_loss = alpha_t * focal_weight * bce
+    Args:
+        pred: (batch, 1, H, W) predicted heatmap (0-1, continuous)
+        target: (batch, 1, H, W) target heatmap (0-1, continuous)
+        smooth: Smoothing factor to avoid division by zero
     
-    return focal_loss.mean()
+    Returns:
+        Scalar soft dice loss
+    """
+    # Ensure values are in [0, 1] range
+    pred = torch.clamp(pred, 0.0, 1.0)
+    target = torch.clamp(target, 0.0, 1.0)
+    
+    # Flatten tensors: (batch, 1, H, W) -> (batch, H*W)
+    pred_flat = pred.view(pred.size(0), -1)
+    target_flat = target.view(target.size(0), -1)
+    
+    # Compute intersection (element-wise product) and union (sum)
+    intersection = (pred_flat * target_flat).sum(dim=1)  # (batch,)
+    pred_sum = pred_flat.sum(dim=1)  # (batch,)
+    target_sum = target_flat.sum(dim=1)  # (batch,)
+    
+    # Soft Dice coefficient: 2 * intersection / (pred_sum + target_sum)
+    dice = (2.0 * intersection + smooth) / (pred_sum + target_sum + smooth)
+    
+    # Dice loss: 1 - dice_coefficient
+    dice_loss_value = 1.0 - dice
+    
+    return dice_loss_value.mean()
 
 
 @dataclass
@@ -101,6 +132,7 @@ class MultiTaskConfig:
     heatmap_loss_weight: float = 2.0
     denoise_loss: str = "l2"
     mode: str = "heatmap"
+    heatmap_loss: str = "soft_dice"  # "mse", "soft_dice", or "dice" for heatmap mode
     use_gradient_clipping: bool = True
     max_grad_norm: float = 1.0
     weight_decay: float = 1e-4
@@ -232,21 +264,30 @@ def train_multitask_model(config: MultiTaskConfig, dataset: MultiTaskDataset) ->
             denoise_loss = denoise_criterion(pred_noise, true_noise)
             
             if config.mode == "segmentation":
-                # Binary segmentation with focal loss
+                # Binary segmentation with Dice loss
                 # pred_seg is (batch, time, space) logits
                 # target is (batch, 1, time, space) binary mask
-                # Add channel dim to pred_seg for focal loss: (batch, 1, time, space)
-                pred_seg_logits = pred_seg.unsqueeze(1)  # (batch, 1, time, space)
-                seg_loss = focal_loss(
-                    pred_seg_logits,
-                    target,
-                    gamma=2.0,  # Standard focal loss gamma
-                )
+                pred_seg_with_channel = pred_seg.unsqueeze(1)  # (batch, 1, time, space)
+                seg_loss = dice_loss(pred_seg_with_channel, target)
             else:  # config.mode == "heatmap"
-                # Heatmap prediction with MSE loss
+                # Heatmap prediction
                 # pred_seg is (batch, time, space), need to add channel dim
                 pred_heatmap = pred_seg.unsqueeze(1)  # (batch, 1, time, space)
-                seg_loss = nn.functional.mse_loss(pred_heatmap, target)
+                
+                if config.heatmap_loss == "mse":
+                    # MSE loss (original)
+                    seg_loss = nn.functional.mse_loss(pred_heatmap, target)
+                elif config.heatmap_loss == "soft_dice":
+                    # Soft Dice loss (recommended for small objects with continuous targets)
+                    seg_loss = soft_dice_loss(pred_heatmap, target)
+                elif config.heatmap_loss == "dice":
+                    # Standard Dice loss (treats heatmap as binary after thresholding)
+                    # Apply sigmoid if needed and threshold
+                    pred_binary = torch.sigmoid(pred_heatmap) if pred_heatmap.min() < 0 else pred_heatmap
+                    target_binary = (target > 0.5).float()
+                    seg_loss = dice_loss(pred_binary, target_binary)
+                else:
+                    raise ValueError(f"Unknown heatmap_loss: {config.heatmap_loss}")
 
             adaptive_denoise_weight = config.denoise_loss_weight
             if config.auto_balance_losses:
@@ -363,4 +404,6 @@ __all__ = [
     "train_multitask_model",
     "save_multitask_model",
     "load_multitask_model",
+    "dice_loss",
+    "soft_dice_loss",
 ]
